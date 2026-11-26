@@ -96,6 +96,12 @@ class VlcPlayerViewModel(
     /** stopPlayback 后不再提交延迟完成的初始队列，避免退出瞬间又起播。 */
     private var playbackStopped = false
 
+    /**
+     * 停止播放时先用停止前快照写入历史，再置 true；
+     * 之后 onStop、观察者和 onCleared 都不得再写，避免 VLC 停止后的归零位置覆盖正确历史。
+     */
+    private var historyFinalized = false
+
     init {
         controller.connect()
         startPlayback()
@@ -155,6 +161,7 @@ class VlcPlayerViewModel(
     }
 
     private fun recordSnapshot(snapshot: PlayerPlaybackState) {
+        if (historyFinalized) return
         if (!request.saveHistory) return
         if (snapshot.path.isBlank()) return
         val path = snapshot.path
@@ -179,14 +186,18 @@ class VlcPlayerViewModel(
 
     /** Activity.onStop 与退出前调用，立即写入当前进度。 */
     override fun saveHistoryNow() {
-        if (!request.saveHistory) return
+        if (historyFinalized || !request.saveHistory) return
         recordSnapshot(controller.state.value)
     }
 
     /** 停止播放并保存进度；Activity 随后 finish。 */
     override fun stopPlayback() {
         playbackStopped = true
-        recordSnapshot(controller.state.value)
+        // 必须在 stop 之前抓取快照；VLC 停止后位置会归零，不能用归零状态覆盖历史。
+        if (!historyFinalized) {
+            recordSnapshot(controller.state.value)
+            historyFinalized = true
+        }
         controller.stop()
     }
 
@@ -344,8 +355,11 @@ class VlcPlayerViewModel(
     // ---------------------------------------------------------------- 生命周期
 
     override fun onCleared() {
-        // 退出兜底：即使 Activity.onStop 未执行，也把最后进度交给独立 IO 作用域写入。
-        recordSnapshot(controller.state.value)
+        // 退出兜底：仅当 stopPlayback 尚未写入时记录一次，避免停止后的归零状态再次覆盖历史。
+        if (!historyFinalized) {
+            recordSnapshot(controller.state.value)
+            historyFinalized = true
+        }
         sleepTimerJob?.cancel()
         controller.release()
         super.onCleared()

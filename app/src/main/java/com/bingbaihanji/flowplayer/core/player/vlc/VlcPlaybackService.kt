@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
@@ -128,6 +129,15 @@ class VlcPlaybackService : Service() {
     private var noisyRegistered = false
     private var foregroundStarted = false
 
+    /** 播放期间持有的局部唤醒锁，暂停/停止/自然结束/出错时释放。 */
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    /**
+     * 已绑定的控制器数量。onUnbind 只在所有客户端解绑后回调一次，此时直接清零；
+     * 用于区分“有人在看 UI（保留结束状态）”与“纯后台播完（结束服务并移除通知）”。
+     */
+    private var boundClientCount = 0
+
     // ---------------------------------------------------------------- 生命周期
 
     override fun onCreate() {
@@ -143,6 +153,11 @@ class VlcPlaybackService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // 必须最先执行，避免前台服务启动超时（ANR）。
         ensureForeground()
+        if (intent?.action == ACTION_STOP) {
+            // 通知栏“停止”：结束后台播放并退出服务，无需初始化 LibVLC。
+            stopPlayback()
+            return START_NOT_STICKY
+        }
         // LibVLC 初始化较慢，放在前台通知建立之后再执行。
         ensureEngine()
         when (intent?.action) {
@@ -155,13 +170,18 @@ class VlcPlaybackService : Service() {
         return START_NOT_STICKY
     }
 
-    override fun onBind(intent: Intent?): IBinder = binder
+    override fun onBind(intent: Intent?): IBinder {
+        boundClientCount++
+        return binder
+    }
 
     /**
-     * 最后一个客户端解绑时：没有媒体且不在播放则顺手结束服务，避免空通知常驻。
+     * 所有客户端解绑时：没有媒体且不在播放则顺手结束服务，避免空通知常驻。
      * 暂停中的通知按产品要求保留，因此不在这里结束。
      */
     override fun onUnbind(intent: Intent?): Boolean {
+        // 系统只在最后一个客户端解绑后回调 onUnbind，因此直接清零。
+        boundClientCount = 0
         if (!playWhenReady && (queue.isEmpty() || ended || currentError != null)) {
             removeForegroundAndStop()
         }
@@ -207,6 +227,7 @@ class VlcPlaybackService : Service() {
             noisyRegistered = false
         }
         abandonAudioFocus()
+        releaseWakeLock()
         if (foregroundStarted) {
             runCatching { ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE) }
             foregroundStarted = false
@@ -258,9 +279,11 @@ class VlcPlaybackService : Service() {
             playWhenReady = false
             buffering = false
             abandonAudioFocus()
+            releaseWakeLock()
             publishState(updateNotification = true)
             return
         }
+        acquireWakeLock()
         publishState(updateNotification = true)
         scheduleTicker()
     }
@@ -272,6 +295,8 @@ class VlcPlaybackService : Service() {
         mainHandler.removeCallbacks(tickerRunnable)
         tickerScheduled = false
         abandonAudioFocus()
+        // 暂停后不再需要保持 CPU 唤醒
+        releaseWakeLock()
         publishState(updateNotification = true)
     }
 
@@ -466,6 +491,7 @@ class VlcPlaybackService : Service() {
         runCatching { mediaPlayer?.stop() }
         publishState(updateNotification = false)
         abandonAudioFocus()
+        releaseWakeLock()
         removeForegroundAndStop()
     }
 
@@ -487,7 +513,9 @@ class VlcPlaybackService : Service() {
             videoAttached = false
             attachedLayout = null
         }
-        val result = runCatching { mp.attachViews(layout, null, false, false) }
+        // 第 3 个参数必须为 true：启用 LibVLC 的字幕 surface，否则内嵌/外挂字幕不会渲染。
+        // 第 4 个参数保持 false，继续使用默认 SurfaceView 渲染视频。
+        val result = runCatching { mp.attachViews(layout, null, true, false) }
         if (result.isFailure) {
             val error = result.exceptionOrNull() ?: IllegalStateException()
             Log.e(TAG, "挂载视频布局失败", error)
@@ -572,6 +600,7 @@ class VlcPlaybackService : Service() {
             buffering = false
             playWhenReady = false
             currentError = "播放失败：${describeThrowable(error)}"
+            releaseWakeLock()
             publishState(updateNotification = true)
             return
         }
@@ -584,10 +613,12 @@ class VlcPlaybackService : Service() {
                 buffering = false
                 playWhenReady = false
                 currentError = "播放失败：${describeThrowable(error)}"
+                releaseWakeLock()
                 publishState(updateNotification = true)
                 return
             }
             requestAudioFocus()
+            acquireWakeLock()
             scheduleTicker()
         }
         publishState(updateNotification = true)
@@ -642,7 +673,12 @@ class VlcPlaybackService : Service() {
             playWhenReady = false
             ended = true
             abandonAudioFocus()
+            releaseWakeLock()
             publishState(updateNotification = true)
+            // 纯后台播放自然播完：没有 UI 绑定就结束服务并移除通知；有绑定则保留结束状态供 UI 展示。
+            if (boundClientCount == 0) {
+                removeForegroundAndStop()
+            }
             return
         }
         loadItem(nextIndex, 0L, autoPlay = true)
@@ -703,12 +739,16 @@ class VlcPlaybackService : Service() {
                         applyStartPositionOnce()
                         applySpeedOnce()
                         refreshVideoSize()
+                        // 兜底保证实际播放期间持有唤醒锁（例如暂停后恢复的路径）。
+                        if (playWhenReady && mediaPlayer?.isPlaying() == true) acquireWakeLock()
                         publishState(updateNotification = true)
                         scheduleTicker()
                     }
 
                     MediaPlayer.Event.Paused -> {
                         buffering = false
+                        // 播放器已进入暂停，释放唤醒锁；用户暂停已在 pause() 中提前释放。
+                        releaseWakeLock()
                         publishState(updateNotification = true)
                     }
 
@@ -716,6 +756,7 @@ class VlcPlaybackService : Service() {
                         // 换片时我们会先 stop 再 setMedia，这里的 Stopped 不代表用户暂停，避免闪断。
                         if (!playWhenReady) {
                             buffering = false
+                            releaseWakeLock()
                             publishState(updateNotification = true)
                         }
                     }
@@ -755,6 +796,7 @@ class VlcPlaybackService : Service() {
                 playWhenReady = false
                 buffering = false
                 currentError = "播放失败：${describeThrowable(error)}"
+                releaseWakeLock()
                 runCatching { publishState(updateNotification = true) }
             }
         }
@@ -787,6 +829,7 @@ class VlcPlaybackService : Service() {
         mainHandler.removeCallbacks(tickerRunnable)
         tickerScheduled = false
         abandonAudioFocus()
+        releaseWakeLock()
         publishState(updateNotification = true)
     }
 
@@ -1064,6 +1107,13 @@ class VlcPlaybackService : Service() {
                     serviceActionPendingIntent(ACTION_NEXT, REQUEST_NEXT),
                 ),
             )
+            .addAction(
+                NotificationCompat.Action(
+                    android.R.drawable.ic_menu_close_clear_cancel,
+                    "停止",
+                    serviceActionPendingIntent(ACTION_STOP, REQUEST_STOP),
+                ),
+            )
             .setStyle(style)
             .build()
     }
@@ -1189,6 +1239,39 @@ class VlcPlaybackService : Service() {
         audioFocusGranted = false
     }
 
+    // ---------------------------------------------------------------- 唤醒锁
+
+    /**
+     * LibVLC 不会为后台播放自动持有唤醒锁，播放期间必须手动持有 PARTIAL_WAKE_LOCK。
+     * 写法与传输服务一致：引用计数关闭、失败只记录日志，不影响播放。
+     */
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        try {
+            val manager = getSystemService(PowerManager::class.java)
+            val lock = manager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$LOCK_TAG:vlc")
+            if (lock != null) {
+                lock.setReferenceCounted(false)
+                lock.acquire()
+                wakeLock = lock
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "获取播放 WakeLock 失败", t)
+        }
+    }
+
+    private fun releaseWakeLock() {
+        val lock = wakeLock
+        wakeLock = null
+        if (lock != null) {
+            try {
+                if (lock.isHeld) lock.release()
+            } catch (t: Throwable) {
+                Log.w(TAG, "释放播放 WakeLock 失败", t)
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- 定时进度
 
     private fun scheduleTicker() {
@@ -1234,17 +1317,20 @@ class VlcPlaybackService : Service() {
         const val CHANNEL_ID = "flowplayer_vlc_playback"
         const val NOTIFICATION_ID = 1002
         const val SESSION_TAG = "FlowPlayerVlc"
+        const val LOCK_TAG = "FlowPlayer:vlc"
 
         const val ACTION_PLAY = "com.bingbaihanji.flowplayer.vlc.action.PLAY"
         const val ACTION_PAUSE = "com.bingbaihanji.flowplayer.vlc.action.PAUSE"
         const val ACTION_TOGGLE_PLAY_PAUSE = "com.bingbaihanji.flowplayer.vlc.action.TOGGLE"
         const val ACTION_PREVIOUS = "com.bingbaihanji.flowplayer.vlc.action.PREVIOUS"
         const val ACTION_NEXT = "com.bingbaihanji.flowplayer.vlc.action.NEXT"
+        const val ACTION_STOP = "com.bingbaihanji.flowplayer.vlc.action.STOP"
 
         const val REQUEST_CONTENT = 0
         const val REQUEST_PREVIOUS = 1
         const val REQUEST_TOGGLE = 2
         const val REQUEST_NEXT = 3
+        const val REQUEST_STOP = 4
 
         const val TICK_INTERVAL_MS = 500L
         const val MIN_SPEED = 0.1f

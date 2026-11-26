@@ -12,6 +12,7 @@ import android.media.MediaScannerConnection
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -104,7 +105,7 @@ private val WifiWarningText = Color(0xFF9A6412)
  * 接收文件（WiFi 传输）页面。
  *
  * 页面只通过 [TransferViewModel] 读取 core/transfer 的状态，不直接访问服务实现。
- * 布局顺序固定为：可选的 Wi-Fi 提示卡 → 服务状态卡 → 接收列表标题 → 文件列表；
+ * 布局顺序固定为：可选的局域网提示卡 → 服务状态卡 → 接收列表标题 → 文件列表；
  * 顶栏“接收列表”据此计算滚动位置。
  */
 @SuppressLint("InlinedApi")
@@ -113,7 +114,10 @@ fun TransferScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val viewModel: TransferViewModel = viewModel()
     val state by viewModel.state.collectAsStateWithLifecycle()
-    val wifiConnected = rememberWifiConnected()
+    val supported = viewModel.supported
+    val lanConnected = rememberLanConnected()
+    // 系统过旧时整个内嵌传输不可用，不再显示“请先连接 Wi-Fi”之类的误导提示。
+    val showNetworkWarning = supported && !lanConnected
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
@@ -132,9 +136,9 @@ fun TransferScreen(onBack: () -> Unit) {
         }
     }
 
-    // 页面首次进入时请求一次通知权限；拒绝不阻塞页面使用。
-    LaunchedEffect(Unit) {
-        if (!notificationAsked && !hasNotificationPermission(context)) {
+    // 页面首次进入时请求一次通知权限；拒绝不阻塞页面使用。不支持内嵌传输时无需请求。
+    LaunchedEffect(supported) {
+        if (supported && !notificationAsked && !hasNotificationPermission(context)) {
             notificationAsked = true
             notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -166,7 +170,7 @@ fun TransferScreen(onBack: () -> Unit) {
             fileCount = state.files.size,
             onBack = onBack,
             onOpenList = {
-                val filesHeaderIndex = if (wifiConnected) 1 else 2
+                val filesHeaderIndex = if (showNetworkWarning) 2 else 1
                 scope.launch {
                     listState.animateScrollToItem(filesHeaderIndex)
                 }
@@ -180,15 +184,16 @@ fun TransferScreen(onBack: () -> Unit) {
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (!wifiConnected) {
-                item(key = "wifi-warning") {
-                    WifiWarningCard(onOpenWifiSettings = { openWifiSettings(context) })
+            if (showNetworkWarning) {
+                item(key = "lan-warning") {
+                    LanWarningCard(onOpenWifiSettings = { openWifiSettings(context) })
                 }
             }
             item(key = "server-status") {
                 ServerStatusCard(
                     state = state,
                     url = url,
+                    supported = supported,
                     onCopy = { url?.let { copyAddress(context, it) } },
                     onStart = startServer,
                     onStop = viewModel::stop,
@@ -299,7 +304,7 @@ private fun TransferTopBar(
 // -------------------------------------------------------------------------------------------------
 
 @Composable
-private fun WifiWarningCard(onOpenWifiSettings: () -> Unit) {
+private fun LanWarningCard(onOpenWifiSettings: () -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -323,14 +328,14 @@ private fun WifiWarningCard(onOpenWifiSettings: () -> Unit) {
                 Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "未连接 Wi-Fi",
+                        text = "未连接局域网",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Spacer(Modifier.height(3.dp))
                     Text(
-                        text = "请先连接 Wi-Fi，电脑与手机需处于同一局域网。",
+                        text = "请先连接 Wi-Fi 或以太网，电脑与手机需处于同一局域网。",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -364,6 +369,7 @@ private fun WifiWarningCard(onOpenWifiSettings: () -> Unit) {
 private fun ServerStatusCard(
     state: TransferState,
     url: String?,
+    supported: Boolean,
     onCopy: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
@@ -374,17 +380,17 @@ private fun ServerStatusCard(
             Box(
                 modifier = Modifier
                     .size(9.dp)
-                    .background(serverStatusColor(state), CircleShape),
+                    .background(serverStatusColor(state, supported), CircleShape),
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                text = serverStatusTitle(state),
+                text = serverStatusTitle(state, supported),
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
             )
-            if (state.starting) {
+            if (supported && state.starting) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(18.dp),
                     strokeWidth = 2.dp,
@@ -397,6 +403,7 @@ private fun ServerStatusCard(
             ErrorBanner(message = error)
         }
         when {
+            !supported -> UnsupportedContent()
             state.running -> RunningContent(
                 state = state,
                 url = url,
@@ -408,6 +415,17 @@ private fun ServerStatusCard(
             else -> StoppedContent(state = state, onStart = onStart)
         }
     }
+}
+
+@Composable
+private fun UnsupportedContent() {
+    Spacer(Modifier.height(14.dp))
+    Text(
+        text = "当前系统版本不支持内嵌传输（需 Android 8.0+）",
+        fontSize = 13.sp,
+        lineHeight = 20.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -800,14 +818,16 @@ private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
 }
 
 @Composable
-private fun serverStatusColor(state: TransferState): Color = when {
+private fun serverStatusColor(state: TransferState, supported: Boolean): Color = when {
+    !supported -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
     state.running -> MaterialTheme.colorScheme.primary
     state.starting -> MaterialTheme.colorScheme.secondary
     state.error?.isNotBlank() == true -> MaterialTheme.colorScheme.error
     else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
 }
 
-private fun serverStatusTitle(state: TransferState): String = when {
+private fun serverStatusTitle(state: TransferState, supported: Boolean): String = when {
+    !supported -> "当前系统不支持内嵌传输"
     state.running -> "接收服务运行中"
     state.starting -> "正在启动接收服务"
     state.error?.isNotBlank() == true -> "接收服务未运行"
@@ -815,20 +835,27 @@ private fun serverStatusTitle(state: TransferState): String = when {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Wi-Fi 状态检测
+// 局域网连接状态检测
 // -------------------------------------------------------------------------------------------------
 
+/**
+ * 检测是否存在可用的局域网连接。
+ *
+ * 与服务侧 resolveLanIpv4 的判定保持一致：不只检查默认网络，而是遍历全部网络查找
+ * Wi-Fi / 以太网，避免 Wi-Fi 作为非默认网络（例如蜂窝数据或 VPN 抢占默认网络）时误显示未连接。
+ */
 @Composable
-private fun rememberWifiConnected(): Boolean {
+private fun rememberLanConnected(): Boolean {
     val context = LocalContext.current
     val manager = remember(context) {
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
     }
-    var connected by remember(manager) { mutableStateOf(manager.isWifiActive()) }
+    val mainExecutor = remember(context) { ContextCompat.getMainExecutor(context) }
+    var connected by remember(manager) { mutableStateOf(manager.hasLanConnection()) }
 
     // 从系统 Wi-Fi 设置返回时重新检测。
     LifecycleResumeEffect(manager) {
-        connected = manager.isWifiActive()
+        connected = manager.hasLanConnection()
         onPauseOrDispose { }
     }
 
@@ -837,37 +864,57 @@ private fun rememberWifiConnected(): Boolean {
         if (cm == null) {
             onDispose { }
         } else {
+            // 一个 NetworkRequest 同时匹配 Wi-Fi 或以太网，且不受“是否为默认网络”限制，
+            // 局域网网络不是默认网络时也能及时收到连接/断开回调。
             val callback = object : ConnectivityManager.NetworkCallback() {
+                private fun refresh() {
+                    // 回调可能来自 Binder 线程，切主线程再写 Compose 状态。
+                    mainExecutor.execute { connected = cm.hasLanConnection() }
+                }
+
                 override fun onAvailable(network: Network) {
-                    connected = cm.isWifiActive()
+                    refresh()
                 }
 
                 override fun onLost(network: Network) {
-                    connected = cm.isWifiActive()
+                    refresh()
                 }
 
                 override fun onCapabilitiesChanged(
                     network: Network,
                     networkCapabilities: NetworkCapabilities,
                 ) {
-                    connected = cm.isWifiActive()
+                    refresh()
                 }
             }
-            runCatching { cm.registerDefaultNetworkCallback(callback) }
+            val registered = runCatching {
+                cm.registerNetworkCallback(
+                    NetworkRequest.Builder()
+                        .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                        .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                        .build(),
+                    callback,
+                )
+            }.isSuccess
             onDispose {
-                runCatching { cm.unregisterNetworkCallback(callback) }
+                if (registered) {
+                    runCatching { cm.unregisterNetworkCallback(callback) }
+                }
             }
         }
     }
     return connected
 }
 
+/** 遍历全部网络（API 21+；本项目 minSdk 24），任一 Wi-Fi / 以太网即视为局域网可用。 */
 @Suppress("DEPRECATION")
-private fun ConnectivityManager?.isWifiActive(): Boolean = runCatching {
+private fun ConnectivityManager?.hasLanConnection(): Boolean = runCatching {
     val manager = this ?: return@runCatching false
-    val network = manager.activeNetwork ?: return@runCatching false
-    val capabilities = manager.getNetworkCapabilities(network) ?: return@runCatching false
-    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+    manager.allNetworks.any { network ->
+        val capabilities = manager.getNetworkCapabilities(network) ?: return@any false
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+    }
 }.getOrDefault(false)
 
 // -------------------------------------------------------------------------------------------------
@@ -965,21 +1012,28 @@ private fun openWithSystem(context: Context, file: TransferFile, mime: String) {
         return
     }
     val scanMime = mime.takeIf { it.isNotBlank() && it != "application/octet-stream" }
+    // MediaScannerConnection 的扫描回调可能运行在后台线程：Toast 与 startActivity 必须切回主线程。
+    val mainExecutor = ContextCompat.getMainExecutor(context)
     val started = runCatching {
         MediaScannerConnection.scanFile(
             context,
             arrayOf(scanPath),
             scanMime?.let { arrayOf(it) },
         ) { _, uri ->
-            if (uri != null) {
-                launchSystemView(context, uri, mime)
-            } else {
-                Toast.makeText(context, "无法打开该文件", Toast.LENGTH_SHORT).show()
+            mainExecutor.execute {
+                if (uri != null) {
+                    launchSystemView(context, uri, mime)
+                } else {
+                    Toast.makeText(context, "无法打开该文件", Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }.isSuccess
     if (!started) {
-        Toast.makeText(context, "无法打开该文件", Toast.LENGTH_SHORT).show()
+        // 扫描启动失败时同样只在主线程提示，避免从非 UI 线程操作界面。
+        mainExecutor.execute {
+            Toast.makeText(context, "无法打开该文件", Toast.LENGTH_SHORT).show()
+        }
     }
 }
 

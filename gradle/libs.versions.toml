@@ -15,6 +15,7 @@ libvlc = "3.7.0"
 androidxMedia = "1.7.0"
 ktor = "3.6.2"
 zxing = "3.5.4"
+desugarJdkLibs = "2.1.5"
 junit = "4.13.2"
 junitVersion = "1.1.5"
 espressoCore = "3.5.1"
@@ -50,6 +51,7 @@ androidx-media = { module = "androidx.media:media", version.ref = "androidxMedia
 ktor-server-core = { module = "io.ktor:ktor-server-core-jvm", version.ref = "ktor" }
 ktor-server-cio = { module = "io.ktor:ktor-server-cio-jvm", version.ref = "ktor" }
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
+desugar-jdk-libs = { module = "com.android.tools:desugar_jdk_libs", version.ref = "desugarJdkLibs" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }

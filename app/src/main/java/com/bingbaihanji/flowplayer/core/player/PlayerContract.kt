@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Log
 import java.io.File
 
 /**
@@ -135,18 +136,46 @@ object PlayerContract {
  */
 object PlayerLauncher {
 
+    private const val TAG = "PlayerLauncher"
+
+    /**
+     * 单次 Intent 最多携带的队列项数。
+     *
+     * 大相册/大文件夹一次播放可能有上千项，全量塞入 Intent extras 会触发
+     * TransactionTooLargeException（Binder 事务缓冲约 1MB）。
+     */
+    private const val MAX_INTENT_QUEUE_ITEMS = 300
+
     fun start(
         context: Context,
         request: PlaybackRequest,
         engineOverride: PlaybackEngine? = null,
     ) {
         if (request.items.isEmpty()) return
+        // 引擎选择必须基于裁剪前的完整队列：旧格式文件可能落在点击项附近的可播放窗口之外，
+        // 若先裁剪再选择，会误判为 Media3，导致整条队列播放失败。
         val engine = engineOverride ?: PlayerEngineSelector.select(request)
-        val intent = PlayerContract.newIntent(context, request, engine).apply {
+        // 以点击项为中心保留最多 MAX_INTENT_QUEUE_ITEMS 项；原队列不超限时保持原样。
+        val intentRequest = if (request.items.size <= MAX_INTENT_QUEUE_ITEMS) {
+            request
+        } else {
+            val clickedIndex = request.safeStartIndex
+            // 窗口尽量让点击项居中；靠近队列首尾时整体平移，仍保持窗口长度不变。
+            val windowStart = (clickedIndex - MAX_INTENT_QUEUE_ITEMS / 2)
+                .coerceIn(0, request.items.size - MAX_INTENT_QUEUE_ITEMS)
+            val windowEnd = windowStart + MAX_INTENT_QUEUE_ITEMS
+            request.copy(
+                items = request.items.subList(windowStart, windowEnd),
+                startIndex = clickedIndex - windowStart,
+            )
+        }
+        val intent = PlayerContract.newIntent(context, intentRequest, engine).apply {
             if (context !is Activity) {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
         }
-        context.startActivity(intent)
+        // 启动失败（如系统限制后台启动 Activity）只记录日志，不让宿主页面崩溃。
+        runCatching { context.startActivity(intent) }
+            .onFailure { error -> Log.e(TAG, "启动播放页失败", error) }
     }
 }

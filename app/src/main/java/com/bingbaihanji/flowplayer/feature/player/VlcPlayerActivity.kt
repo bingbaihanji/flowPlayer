@@ -2,6 +2,7 @@ package com.bingbaihanji.flowplayer.feature.player
 
 import android.Manifest
 import android.app.PictureInPictureParams
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -22,8 +23,10 @@ import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toDrawable
 import androidx.core.view.WindowCompat
+import com.bingbaihanji.flowplayer.core.player.PlaybackEngine
 import com.bingbaihanji.flowplayer.core.player.PlaybackRequest
 import com.bingbaihanji.flowplayer.core.player.PlayerContract
+import com.bingbaihanji.flowplayer.core.player.PlayerLauncher
 
 /**
  * LibVLC 兼容播放页。
@@ -121,6 +124,22 @@ class VlcPlayerActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * singleTop 模式下收到新的播放请求：先保存并停止旧播放，再以 VLC 引擎重启本页。
+     * 兼容页固定走 VLC，避免与 Media3 页因引擎选择来回切换形成循环。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val request = PlayerContract.read(intent)
+        if (request == null || request.items.isEmpty()) return
+        if (this::playbackRequest.isInitialized) {
+            viewModel.stopPlayback()
+        }
+        // 先 finish 再启动，避免目标仍是当前 singleTop 实例时反复触发 onNewIntent。
+        finish()
+        PlayerLauncher.start(this, request, PlaybackEngine.VLC)
+    }
+
     override fun onResume() {
         super.onResume()
         if (suppressPipForExternalUi) {
@@ -130,6 +149,7 @@ class VlcPlayerActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        // stopPlayback 已记录停止前进度；ViewModel 内部会忽略停止后的再次写入，避免 0 覆盖历史。
         if (this::playbackRequest.isInitialized) {
             viewModel.saveHistoryNow()
         }

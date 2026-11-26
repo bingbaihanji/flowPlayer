@@ -97,15 +97,16 @@ class PlaybackService : MediaSessionService() {
     }
 
     /**
-     * 把外挂字幕追加到当前媒体项，并恢复播放位置与播放意图。
+     * 把外挂字幕追加到当前媒体项，并保留队列、进度与播放意图。
      *
-     * replaceMediaItem 会让当前项重新加载，因此需要重新 prepare 并 seek 回原位置。
+     * 仅 replaceMediaItem 不会重建底层 MediaSource，新的字幕配置不会生效；
+     * 因此这里重建整个队列的 MediaItem 列表，用 setMediaItems 重新设置当前索引与位置后 prepare。
      */
     private fun applyExternalSubtitle(uri: Uri, mimeType: String?): Boolean {
         if (!::player.isInitialized) return false
         val index = player.currentMediaItemIndex
-        if (index == C.INDEX_UNSET) return false
-        val currentItem = player.currentMediaItem ?: return false
+        if (index == C.INDEX_UNSET || index !in 0 until player.mediaItemCount) return false
+        val currentItem = player.getMediaItemAt(index)
 
         val resolvedMime = mimeType?.takeIf { it.isNotBlank() }
             ?: PlayerContract.subtitleMimeFor(uri.lastPathSegment.orEmpty())
@@ -122,18 +123,26 @@ class PlaybackService : MediaSessionService() {
             .setMimeType(resolvedMime)
             .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
             .build()
-        val newItem = currentItem.buildUpon()
-            .setSubtitleConfigurations(existingSubtitles + newSubtitle)
-            .build()
+        // 只替换当前项的 subtitleConfigurations，其余队列项原样保留
+        val updatedItems = (0 until player.mediaItemCount).map { itemIndex ->
+            val item = player.getMediaItemAt(itemIndex)
+            if (itemIndex == index) {
+                item.buildUpon()
+                    .setSubtitleConfigurations(existingSubtitles + newSubtitle)
+                    .build()
+            } else {
+                item
+            }
+        }
 
-        player.replaceMediaItem(index, newItem)
+        player.setMediaItems(updatedItems, index, position)
         // 打开文本轨并清除旧的覆盖选择，默认标记会优先选中新字幕
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
             .clearOverridesOfType(C.TRACK_TYPE_TEXT)
             .build()
         player.prepare()
-        player.seekTo(index, position)
+        // 恢复导入前的播放意图：播放中继续播放，暂停状态保持暂停
         player.playWhenReady = playWhenReady
         return true
     }

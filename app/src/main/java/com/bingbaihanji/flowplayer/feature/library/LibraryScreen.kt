@@ -138,6 +138,7 @@ fun LibraryScreen() {
 
             file.kind == MediaKind.VIDEO || file.kind == MediaKind.AUDIO -> {
                 // 同类型（视频/音频）的非目录文件构成播放队列，点击项作为起始位置。
+                // 队列大小不在此处裁剪：统一交给 PlayerLauncher 按点击项选取 Intent 窗口。
                 val queue = state.files.filter { it.kind == file.kind && !it.isDirectory }
                 val index = queue.indexOf(file).coerceAtLeast(0)
                 val items = queue.map { media ->
@@ -1944,15 +1945,30 @@ private fun libraryQueueTitle(state: LibraryUiState): String = when (val locatio
     }
 }
 
+/** 图片查看器单次 Intent 最多携带的路径数，避免大相册触发 TransactionTooLargeException。 */
+private const val MAX_IMAGE_VIEWER_PATHS = 300
+
 private fun launchImageViewer(
     context: Context,
     clicked: MediaFile,
     images: List<MediaFile>,
     title: String,
 ) {
-    val paths = ArrayList<String>(images.size)
-    images.forEach { paths.add(it.path) }
-    val index = images.indexOfFirst { it.path == clicked.path }.coerceAtLeast(0)
+    val clickedIndex = images.indexOfFirst { it.path == clicked.path }.coerceAtLeast(0)
+    // 与播放器一致：以点击图片为中心最多保留 MAX_IMAGE_VIEWER_PATHS 张，索引同步调整。
+    // 相册不足该数量时保留全量，不改变原有浏览顺序。
+    val windowStart = if (images.size <= MAX_IMAGE_VIEWER_PATHS) {
+        0
+    } else {
+        (clickedIndex - MAX_IMAGE_VIEWER_PATHS / 2)
+            .coerceIn(0, images.size - MAX_IMAGE_VIEWER_PATHS)
+    }
+    val windowEnd = minOf(images.size, windowStart + MAX_IMAGE_VIEWER_PATHS)
+    val visibleImages = images.subList(windowStart, windowEnd)
+    val paths = ArrayList<String>(visibleImages.size)
+    visibleImages.forEach { paths.add(it.path) }
+    val index = (clickedIndex - windowStart)
+        .coerceIn(0, (paths.size - 1).coerceAtLeast(0))
     val intent = Intent(context, ImageViewerActivity::class.java).apply {
         putStringArrayListExtra(ImageViewerActivity.EXTRA_PATHS, paths)
         putExtra(ImageViewerActivity.EXTRA_INDEX, index)
@@ -1961,5 +1977,9 @@ private fun launchImageViewer(
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
     }
-    context.startActivity(intent)
+    // 启动失败（如后台启动限制）仅提示用户，不崩溃。
+    runCatching { context.startActivity(intent) }
+        .onFailure {
+            Toast.makeText(context, "无法打开图片查看器", Toast.LENGTH_SHORT).show()
+        }
 }

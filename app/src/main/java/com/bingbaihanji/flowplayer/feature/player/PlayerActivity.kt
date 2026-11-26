@@ -2,6 +2,7 @@ package com.bingbaihanji.flowplayer.feature.player
 
 import android.Manifest
 import android.app.PictureInPictureParams
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -49,9 +50,6 @@ class PlayerActivity : ComponentActivity() {
 
     /** Compose 读取的 PiP 状态；进入/退出画中画时更新。 */
     val pipModeState = mutableStateOf(false)
-
-    /** 已切到兼容模式时跳过 onStop 写历史，避免 stop 后的空进度覆盖掉正确位置。 */
-    private var fallbackStarted = false
 
     private var lastPipParams: PictureInPictureParams? = null
 
@@ -141,9 +139,8 @@ class PlayerActivity : ComponentActivity() {
                     },
                     onCompatibilityFallback = if (viewModel.canFallbackToVlc) {
                         {
-                            fallbackStarted = true
                             val fallbackRequest = viewModel.buildCompatibilityRequest()
-                            // stopPlayback 会先记录当前进度；随后停止 Media3 并由 VLC 接着播。
+                            // stopPlayback 会先记录当前进度并锁定历史；随后停止 Media3 并由 VLC 接着播。
                             viewModel.stopPlayback()
                             PlayerLauncher.start(
                                 this@PlayerActivity,
@@ -160,6 +157,24 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * singleTop 模式下收到新的播放请求（App 内再次起播或系统 VIEW 打开新文件）：
+     * 先保存并停止旧播放，再按队列类型重启对应播放页，不能静默丢弃。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val request = PlayerContract.read(intent)
+            ?: PlayerContract.fromViewIntent(intent, this)
+        if (request == null || request.items.isEmpty()) return
+        if (this::playbackRequest.isInitialized) {
+            viewModel.stopPlayback()
+        }
+        val engine = PlayerEngineSelector.select(request)
+        // 先 finish 再启动，避免目标仍是当前 singleTop 实例时反复触发 onNewIntent。
+        finish()
+        PlayerLauncher.start(this, request, engine)
+    }
+
     override fun onResume() {
         super.onResume()
         if (suppressPipForExternalUi) {
@@ -169,8 +184,8 @@ class PlayerActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        // 兼容模式切换时 stopPlayback 已记录当前进度，避免 stop 后的空进度重复写入。
-        if (this::playbackRequest.isInitialized && !fallbackStarted) {
+        // stopPlayback 已记录停止前进度；ViewModel 内部会忽略停止后的再次写入，避免 0 覆盖历史。
+        if (this::playbackRequest.isInitialized) {
             viewModel.saveHistoryNow()
         }
         super.onStop()

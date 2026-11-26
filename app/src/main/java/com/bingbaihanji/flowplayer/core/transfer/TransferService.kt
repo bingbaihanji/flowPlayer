@@ -8,7 +8,10 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.Build
@@ -48,8 +51,10 @@ import java.security.SecureRandom
  * - onCreate/onStartCommand 第一步就是 startForeground（通知 id 1003），然后再做任何磁盘/Ktor 操作；
  * - startServer 在 IO 线程启动 Ktor，成功后发布 running/address/port/token；
  * - stopServer 释放 Ktor、WifiLock、WakeLock 与通知并 stopSelf；
- * - 启动失败（无 Wi-Fi / 端口不可用）会保留 error 状态供 UI 展示，但会退出前台并 stopSelf，
+ * - 启动失败（无局域网 / 端口不可用）会保留 error 状态供 UI 展示，但会退出前台并 stopSelf，
  *   避免一个不工作的前台服务长期驻留；控制器仍绑定时服务对象与状态继续可用，可再次启动；
+ * - 运行期间监听 Wi-Fi / 以太网地址变化，断网只更新提示，服务器保持运行等待重连；
+ * - Android 15+ 的 dataSync 前台服务 6 小时时限由 onTimeout 快速停止前台与服务，避免系统强杀；
  * - onTaskRemoved 在未运行时清理并 stopSelf，运行中则继续传输；
  * - onDestroy 兜底释放全部资源，可被重新启动。
  */
@@ -87,6 +92,12 @@ class TransferService : Service() {
 
     /** 序列化通知的创建/刷新/移除，避免停止后后台刷新又重新建出普通通知。 */
     private val notificationLock = Any()
+
+    /** 运行期监听的局域网网络回调；启动成功后注册，停止/超时/销毁时注销。 */
+    private var lanNetworkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /** 保护 [lanNetworkCallback] 的注册与注销。 */
+    private val networkLock = Any()
 
     private var wifiLock: WifiManager.WifiLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -137,8 +148,28 @@ class TransferService : Service() {
         super.onTaskRemoved(rootIntent)
     }
 
+    /**
+     * Android 15（API 35）起 dataSync 前台服务单次最长运行约 6 小时，超时由系统回调此方法。
+     * 必须在回调内尽快停止前台与服务，否则会触发 ForegroundServiceDidNotStopInTimeException。
+     * 按平台约定不调用 super，避免父类的默认实现参与处理。
+     */
+    override fun onTimeout(startId: Int) {
+        Log.w(TAG, "前台服务超时（startId=$startId），停止传输")
+        handleForegroundTimeout()
+    }
+
+    /**
+     * Android 15 起系统也会按前台服务类型回调 onTimeout(startId, fgsType)；
+     * 与 [onTimeout] 共用同一套快速停止逻辑，不调用 super。
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "前台服务超时（startId=$startId, type=$fgsType），停止传输")
+        handleForegroundTimeout()
+    }
+
     override fun onDestroy() {
         destroyed = true
+        unregisterLanNetworkCallback()
         serviceScope.cancel()
 
         val currentServer = synchronized(serverLock) {
@@ -235,7 +266,7 @@ class TransferService : Service() {
         // 没有局域网 IPv4 时启动也毫无意义，直接给出明确提示。
         val address = resolveLanIpv4()
         if (address == null) {
-            failStart("请先连接 Wi-Fi")
+            failStart("请先连接 Wi-Fi 或以太网")
             return
         }
 
@@ -292,6 +323,8 @@ class TransferService : Service() {
                     error = null,
                 )
             }
+            // 服务启动成功后再监听局域网变化：保持服务器运行，只随地址变化刷新状态与通知。
+            registerLanNetworkCallback()
             refreshNotification()
             Log.i(TAG, "传输服务启动成功：http://$address:$actualPort/")
         } catch (e: CancellationException) {
@@ -317,6 +350,8 @@ class TransferService : Service() {
                 error = null,
             )
         }
+
+        unregisterLanNetworkCallback()
 
         val currentServer = synchronized(serverLock) {
             server.also { server = null }
@@ -353,12 +388,51 @@ class TransferService : Service() {
                 error = message,
             )
         }
+        unregisterLanNetworkCallback()
         releaseLocks()
         refreshNotification()
         withContext(Dispatchers.Main.immediate) {
             removeForegroundNotification()
             stopSelf()
         }
+    }
+
+    /**
+     * 系统前台服务时限到达后的快速收尾。
+     *
+     * 先撤下前台通知并 stopSelf，再释放 Ktor/WifiLock/WakeLock，确保系统判定服务已停止；
+     * 错误信息保留在 state 中，控制器仍绑定时 UI 可以直接看到停止原因并可重新启动。
+     */
+    private fun handleForegroundTimeout() {
+        if (destroyed) return
+        unregisterLanNetworkCallback()
+        _state.update {
+            it.copy(
+                running = false,
+                starting = false,
+                address = "",
+                port = 0,
+                token = "",
+                error = FOREGROUND_TIMEOUT_MESSAGE,
+            )
+        }
+
+        // 优先撤下前台并请求停止，避免超过系统宽限期。
+        removeForegroundNotification()
+        stopSelf()
+
+        val currentServer = synchronized(serverLock) {
+            server.also { server = null }
+        }
+        if (currentServer != null) {
+            try {
+                currentServer.stop()
+            } catch (t: Throwable) {
+                Log.w(TAG, "超时停止传输服务失败", t)
+            }
+        }
+        releaseLocks()
+        Log.w(TAG, "传输前台服务已因系统运行时限停止")
     }
 
     private fun refreshFilesInternal() {
@@ -403,7 +477,7 @@ class TransferService : Service() {
         }
     }
 
-    private fun lanIpv4Of(connectivityManager: ConnectivityManager, network: android.net.Network): String? {
+    private fun lanIpv4Of(connectivityManager: ConnectivityManager, network: Network): String? {
         val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return null
         val isLan = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
@@ -416,6 +490,120 @@ class TransferService : Service() {
             .filterIsInstance<Inet4Address>()
             .firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
             ?.hostAddress
+    }
+
+    /**
+     * 服务运行期间监听 Wi-Fi / 以太网连接变化。
+     *
+     * 同一个 NetworkRequest 同时声明 Wi-Fi 与以太网（多个 transport 之间为“或”关系），
+     * 即使局域网网络不是默认网络也能收到回调，不会因蜂窝/VPN 抢占默认网络而漏掉地址变化。
+     * 注册失败只记录日志，不影响已经启动的服务器。
+     */
+    private fun registerLanNetworkCallback() {
+        if (destroyed) return
+        val connectivityManager = getSystemService(ConnectivityManager::class.java) ?: return
+        synchronized(networkLock) {
+            if (destroyed || lanNetworkCallback != null) return@synchronized
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    refreshLanAddress()
+                }
+
+                override fun onLost(network: Network) {
+                    refreshLanAddress()
+                }
+
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    networkCapabilities: NetworkCapabilities,
+                ) {
+                    refreshLanAddress()
+                }
+
+                override fun onLinkPropertiesChanged(
+                    network: Network,
+                    linkProperties: LinkProperties,
+                ) {
+                    // DHCP 续租、静态地址切换等 IP 变化会走这里，需要重新解析地址。
+                    refreshLanAddress()
+                }
+            }
+            try {
+                connectivityManager.registerNetworkCallback(lanNetworkRequest(), callback)
+                lanNetworkCallback = callback
+            } catch (t: Throwable) {
+                Log.w(TAG, "注册局域网网络回调失败", t)
+            }
+        }
+    }
+
+    /** 注销运行期网络回调；可重复调用。 */
+    private fun unregisterLanNetworkCallback() {
+        val connectivityManager = getSystemService(ConnectivityManager::class.java)
+        synchronized(networkLock) {
+            val callback = lanNetworkCallback ?: return@synchronized
+            lanNetworkCallback = null
+            if (connectivityManager == null) return@synchronized
+            runCatching { connectivityManager.unregisterNetworkCallback(callback) }
+                .onFailure { Log.w(TAG, "注销局域网网络回调失败", it) }
+        }
+    }
+
+    /** 同时匹配 Wi-Fi 或以太网网络的请求，不要求它是系统默认网络。 */
+    private fun lanNetworkRequest(): NetworkRequest =
+        NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+            .build()
+
+    /** 网络回调线程不直接解析网络，切到 IO 线程后按当前网络状态重新计算地址。 */
+    private fun refreshLanAddress() {
+        if (destroyed) return
+        serviceScope.launch { applyCurrentLanAddress() }
+    }
+
+    /**
+     * 地址变化时只刷新 [state] 与通知，不停止服务器：
+     * - 断网时保留 running，地址清空并给出断开提示，等待重新连接；
+     * - 恢复/切换网络后写回新地址并清掉断开提示。
+     */
+    private fun applyCurrentLanAddress() {
+        if (destroyed) return
+        val current = _state.value
+        if (!current.running) return
+
+        val address = resolveLanIpv4()
+        if (address == null) {
+            if (current.address.isNotBlank()) {
+                _state.update { state ->
+                    // 解析期间用户可能已经停止服务，此时不能再把断开提示写回状态。
+                    if (!state.running || state.address.isBlank()) {
+                        state
+                    } else {
+                        state.copy(address = "", error = LAN_DISCONNECTED_MESSAGE)
+                    }
+                }
+                refreshNotification()
+                Log.w(TAG, "局域网连接已断开，传输服务保持运行等待重连")
+            }
+            return
+        }
+
+        val wasDisconnected = current.error == LAN_DISCONNECTED_MESSAGE
+        if (address == current.address && !wasDisconnected) return
+
+        _state.update { state ->
+            if (!state.running) {
+                state
+            } else {
+                state.copy(
+                    address = address,
+                    error = if (state.error == LAN_DISCONNECTED_MESSAGE) null else state.error,
+                )
+            }
+        }
+        refreshNotification()
+        Log.i(TAG, "局域网地址已更新：http://$address:${current.port}/")
     }
 
     /**
@@ -561,7 +749,10 @@ class TransferService : Service() {
         val statusText = when {
             current.error != null -> current.error
             current.starting -> "正在启动…"
-            current.running -> "http://${current.address}:${current.port}/ · ${current.files.size} 个文件"
+            // 运行中但地址被清空说明局域网已断开，避免拼出 "http://:port" 这样的无效地址。
+            current.running && current.address.isNotBlank() ->
+                "http://${current.address}:${current.port}/ · ${current.files.size} 个文件"
+            current.running -> "网络已断开，等待重新连接"
             else -> "服务未运行"
         }
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -636,6 +827,10 @@ class TransferService : Service() {
 
         private const val LOCK_TAG = "FlowPlayer:transfer"
         private const val TOKEN_BYTES = 24
+
+        private const val LAN_DISCONNECTED_MESSAGE = "网络连接已断开，请重新连接 Wi-Fi 或以太网"
+        private const val FOREGROUND_TIMEOUT_MESSAGE =
+            "前台服务已达到系统运行时限（约 6 小时），传输已停止，请重新启动"
 
         private const val REQUEST_OPEN_APP = 0
         private const val REQUEST_STOP = 1
