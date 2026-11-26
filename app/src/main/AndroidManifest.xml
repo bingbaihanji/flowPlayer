@@ -40,6 +40,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+                android:name=".feature.viewer.image.ImageViewerActivity"
+                android:exported="false"
+                android:theme="@style/Theme.FlowPlayer" />
     </application>
 
 </manifest>
