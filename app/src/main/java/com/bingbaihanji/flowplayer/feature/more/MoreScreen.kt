@@ -17,7 +17,7 @@ fun MoreScreen(
             onClick = onOpenTransfer,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("接收文件（M4 实现）")
+            Text("接收文件")
         }
         Button(
             onClick = onOpenSettings,

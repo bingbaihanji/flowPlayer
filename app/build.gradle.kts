@@ -84,6 +84,10 @@ dependencies {
     implementation(libs.libvlc.all)
     implementation(libs.androidx.media)
 
+    implementation(libs.ktor.server.core)
+    implementation(libs.ktor.server.cio)
+    implementation(libs.zxing.core)
+
     debugImplementation(libs.compose.ui.tooling)
 
     testImplementation(libs.junit)
