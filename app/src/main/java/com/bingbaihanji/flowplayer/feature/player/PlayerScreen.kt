@@ -49,6 +49,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.bingbaihanji.flowplayer.core.data.settings.SpeedMode
 import com.bingbaihanji.flowplayer.core.player.AspectMode
 import com.bingbaihanji.flowplayer.core.player.PlayerPlaybackState
 import com.bingbaihanji.flowplayer.core.ui.theme.EvDarkOnSurfaceVariant
@@ -98,6 +99,7 @@ fun PlayerScreen(
     val state by session.state.collectAsStateWithLifecycle()
     val locked by session.isLocked.collectAsStateWithLifecycle()
     val timerRemainingMs by session.timerRemainingMs.collectAsStateWithLifecycle()
+    val preferredSpeedMode by session.preferredSpeedMode.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
@@ -125,9 +127,14 @@ fun PlayerScreen(
     var interactionTick by remember { mutableIntStateOf(0) }
     var activeSheet by remember { mutableStateOf<PlayerSheet?>(null) }
     var moreExpanded by remember { mutableStateOf(false) }
-    var speedListMode by remember { mutableStateOf(SpeedListMode.NORMAL) }
+    var speedListMode by remember { mutableStateOf(preferredSpeedMode.toSpeedListMode()) }
     var seekPreviewMs by remember { mutableStateOf<Long?>(null) }
     var aspectMode by remember { mutableStateOf(AspectMode.FIT) }
+
+    // 设置读取完成或设置页修改后同步档位模式；用户本次手动切换只在会话内生效。
+    LaunchedEffect(preferredSpeedMode) {
+        speedListMode = preferredSpeedMode.toSpeedListMode()
+    }
 
     fun revealControls() {
         controlsVisible = true
@@ -435,6 +442,12 @@ private fun PlayerErrorOverlay(
             }
         }
     }
+}
+
+/** 设置页的倍速模式映射到播放页倍速菜单的档位模式。 */
+private fun SpeedMode.toSpeedListMode(): SpeedListMode = when (this) {
+    SpeedMode.NORMAL -> SpeedListMode.NORMAL
+    SpeedMode.FINE -> SpeedListMode.FINE
 }
 
 private fun isAudioOnly(state: PlayerPlaybackState): Boolean {

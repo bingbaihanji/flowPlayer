@@ -23,7 +23,7 @@ fun MoreScreen(
             onClick = onOpenSettings,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("设置（M5 实现）")
+            Text("设置")
         }
     }
 }

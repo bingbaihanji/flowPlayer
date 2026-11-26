@@ -89,7 +89,13 @@ class TransferServer(
 
             var created: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
             try {
-                val createdServer = embeddedServer(CIO, port = candidate, host = BIND_HOST) {
+                val createdServer = embeddedServer(
+                    CIO,
+                    port = candidate,
+                    host = BIND_HOST,
+                    // 关闭 Ktor 的自动重载路径监听：Android 上不需要，且可避免文件系统 WatchService。
+                    watchPaths = emptyList(),
+                ) {
                     installRoutes()
                 }
                 created = createdServer
@@ -111,8 +117,9 @@ class TransferServer(
     }
 
     /**
-     * 停止服务器并释放监听端口。可重复调用；异常只记录不抛出。
+     * 停止服务器并释放监听端口。可重复调用（并发调用也安全）；异常只记录不抛出。
      */
+    @Synchronized
     fun stop() {
         val current = server ?: return
         server = null
@@ -280,8 +287,6 @@ class TransferServer(
             return
         }
 
-        if (uploadedCount > 0) notifyFilesChanged()
-
         when {
             filePartCount == 0 -> call.respondError(HttpStatusCode.BadRequest, "没有收到文件")
             uploadedCount > 0 -> call.respondJson(uploadSuccessJson(uploadedCount, errors))
@@ -297,6 +302,8 @@ class TransferServer(
     /**
      * 把单个上传分段流式写入临时文件，成功后移动到根目录。
      * 超过 4GB 时在达到上限前停止写入，临时文件随后删除。
+     *
+     * 写盘是刻意的阻塞 IO：Ktor CIO 的请求协程运行在 IO 线程池上，分块写入不会读入整个文件。
      */
     @Suppress("BlockingMethodInNonBlockingContext")
     private suspend fun saveUploadPart(part: PartData.FileItem): UploadOutcome {
@@ -337,6 +344,9 @@ class TransferServer(
                 output.flush()
             }
 
+            // 客户端中途断开时通道会带异常关闭；不检查会把截断文件误当成上传成功。
+            channel.closedCause?.let { throw it }
+
             if (tooLarge) {
                 return UploadOutcome.Failed("文件超过 4GB 上限：$safeName", tooLarge = true)
             }
@@ -344,6 +354,8 @@ class TransferServer(
             val target = storage.commitTempFile(tempFile, safeName)
             committed = true
             Log.i(TAG, "接收文件完成：${target.name}（${target.length()} 字节）")
+            // 每落盘一个文件就通知服务刷新列表；即使后续分段失败或客户端中断，已完成的文件也不会漏刷新。
+            notifyFilesChanged()
             return UploadOutcome.Saved
         } catch (e: CancellationException) {
             throw e

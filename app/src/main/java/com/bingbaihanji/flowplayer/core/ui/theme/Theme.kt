@@ -10,6 +10,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
+import com.bingbaihanji.flowplayer.core.data.settings.ThemeMode
 
 private val LightColors = lightColorScheme(
     primary = EvPrimary,
@@ -41,11 +42,19 @@ private val DarkColors = darkColorScheme(
     outline = EvDarkOutline,
 )
 
+/**
+ * 应用主题。明暗由 [themeMode] 解析：跟随系统时使用系统设置，否则强制浅色/深色。
+ */
 @Composable
 fun FlowPlayerTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    themeMode: ThemeMode = ThemeMode.FOLLOW_SYSTEM,
     content: @Composable () -> Unit,
 ) {
+    val darkTheme = when (themeMode) {
+        ThemeMode.FOLLOW_SYSTEM -> isSystemInDarkTheme()
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+    }
     val colors = if (darkTheme) DarkColors else LightColors
     val view = LocalView.current
     if (!view.isInEditMode) {

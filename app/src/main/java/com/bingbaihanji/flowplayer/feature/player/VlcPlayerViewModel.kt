@@ -9,6 +9,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.bingbaihanji.flowplayer.core.data.repository.HistoryRepository
+import com.bingbaihanji.flowplayer.core.data.settings.AppSettings
+import com.bingbaihanji.flowplayer.core.data.settings.SettingsRepository
+import com.bingbaihanji.flowplayer.core.data.settings.SpeedMode
 import com.bingbaihanji.flowplayer.core.player.AspectMode
 import com.bingbaihanji.flowplayer.core.player.PlayMode
 import com.bingbaihanji.flowplayer.core.player.PlaybackRequest
@@ -27,6 +30,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -48,6 +52,7 @@ class VlcPlayerViewModel(
 
     private val controller = VlcPlayerController(application)
     private val historyRepository = HistoryRepository.from(application)
+    private val settingsRepository = SettingsRepository.from(application)
 
     /**
      * 历史写入使用独立作用域：退出播放页时 ViewModel 很快被清理，避免正在进行的 Room 写入被取消。
@@ -71,6 +76,10 @@ class VlcPlayerViewModel(
     /** VLC 已是兼容兜底引擎，失败后没有下一级引擎可切。 */
     override val canFallbackToVlc: Boolean = false
 
+    /** 设置读取完成前使用默认“常规倍数”，完成后再更新为设置值。 */
+    private val _preferredSpeedMode = MutableStateFlow(SpeedMode.NORMAL)
+    override val preferredSpeedMode: StateFlow<SpeedMode> = _preferredSpeedMode.asStateFlow()
+
     private val _isLocked = MutableStateFlow(false)
     override val isLocked: StateFlow<Boolean> = _isLocked.asStateFlow()
 
@@ -84,10 +93,38 @@ class VlcPlayerViewModel(
     private var lastObservedState: PlayerPlaybackState? = null
     private var boostOriginalSpeed: Float? = null
 
+    /** stopPlayback 后不再提交延迟完成的初始队列，避免退出瞬间又起播。 */
+    private var playbackStopped = false
+
     init {
         controller.connect()
-        controller.playQueue(request)
-        observeForHistory()
+        startPlayback()
+    }
+
+    /**
+     * 在提交播放队列前读取设置与历史：
+     * - 设置读取失败时退回 [AppSettings] 默认值；
+     * - 续播读取失败只影响起始进度，不阻塞播放；
+     * - DataStore/Room 的挂起读取在 IO 线程完成，主线程只做控制器调用。
+     */
+    private fun startPlayback() {
+        viewModelScope.launch {
+            val (settings, resolvedRequest) = withContext(Dispatchers.IO) {
+                val loaded = runCatching { settingsRepository.settings.first() }
+                    .onFailure { Log.w(TAG, "读取播放设置失败，使用默认值", it) }
+                    .getOrNull() ?: AppSettings()
+                loaded to request.withResumePosition(
+                    historyRepository = historyRepository,
+                    continueLastPosition = loaded.continueLastPosition,
+                )
+            }
+            if (playbackStopped) return@launch
+            _preferredSpeedMode.value = settings.speedMode
+            controller.setPlayMode(settings.playMode)
+            controller.playQueue(resolvedRequest)
+            // 队列提交后再观察，避免把上一会话残留状态误记为本次播放历史。
+            observeForHistory()
+        }
     }
 
     // ---------------------------------------------------------------- 历史
@@ -148,6 +185,7 @@ class VlcPlayerViewModel(
 
     /** 停止播放并保存进度；Activity 随后 finish。 */
     override fun stopPlayback() {
+        playbackStopped = true
         recordSnapshot(controller.state.value)
         controller.stop()
     }
@@ -172,7 +210,17 @@ class VlcPlayerViewModel(
 
     override fun setSpeed(speed: Float) = controller.setSpeed(speed)
 
-    override fun setPlayMode(mode: PlayMode) = controller.setPlayMode(mode)
+    /**
+     * 播放页切换模式先作用于当前控制器，再异步写回“默认播放模式”；
+     * 写入失败只影响下次进入的默认值，不影响本次会话。
+     */
+    override fun setPlayMode(mode: PlayMode) {
+        controller.setPlayMode(mode)
+        viewModelScope.launch {
+            runCatching { settingsRepository.setPlayMode(mode) }
+                .onFailure { Log.w(TAG, "保存默认播放模式失败", it) }
+        }
+    }
 
     /**
      * 统一轨道选择入口：字幕走 selectTextTrack，音频/视频分别走内核的对应接口。

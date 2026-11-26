@@ -1,6 +1,7 @@
 package com.bingbaihanji.flowplayer.feature.library
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -9,6 +10,7 @@ import com.bingbaihanji.flowplayer.core.common.permissions.hasStorageAccess
 import com.bingbaihanji.flowplayer.core.data.db.PlaylistSummary
 import com.bingbaihanji.flowplayer.core.data.file.*
 import com.bingbaihanji.flowplayer.core.data.repository.PlaylistRepository
+import com.bingbaihanji.flowplayer.core.data.settings.SettingsRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -40,6 +42,7 @@ class LibraryViewModel(
     val messages: Flow<String> = _messages.receiveAsFlow()
 
     private val playlistRepository = PlaylistRepository.from(application)
+    private val settingsRepository = SettingsRepository.from(application)
 
     /** 供“加入播放列表”对话框选择的播放列表。 */
     val playlists: StateFlow<List<PlaylistSummary>> = playlistRepository.observePlaylists()
@@ -53,8 +56,37 @@ class LibraryViewModel(
     private var loadJob: Job? = null
 
     init {
-        if (_state.value.permissionGranted) {
-            reload()
+        restoreSettingsAndLoad()
+    }
+
+    /**
+     * 先恢复上次的排序/视图/隐藏文件设置，再按恢复后的条件首次加载，
+     * 避免先用默认排序加载一遍再切换造成的闪烁。
+     */
+    private fun restoreSettingsAndLoad() {
+        viewModelScope.launch {
+            val settings = runCatching { settingsRepository.settings.first() }
+                .onFailure { Log.w(TAG, "读取文件库设置失败", it) }
+                .getOrNull()
+            if (settings != null) {
+                _state.update {
+                    it.copy(
+                        sort = FileSortSpec(
+                            by = settings.sortBy,
+                            ascending = settings.sortAscending,
+                        ),
+                        showHidden = settings.showHiddenFiles,
+                        viewMode = if (settings.libraryGridView) {
+                            LibraryViewMode.GRID
+                        } else {
+                            LibraryViewMode.LIST
+                        },
+                    )
+                }
+            }
+            if (_state.value.permissionGranted) {
+                reload()
+            }
         }
     }
 
@@ -83,32 +115,44 @@ class LibraryViewModel(
     }
 
     fun toggleViewMode() {
-        _state.update {
-            it.copy(
-                viewMode = if (it.viewMode == LibraryViewMode.LIST) {
-                    LibraryViewMode.GRID
-                } else {
-                    LibraryViewMode.LIST
-                },
-            )
+        val next = if (_state.value.viewMode == LibraryViewMode.LIST) {
+            LibraryViewMode.GRID
+        } else {
+            LibraryViewMode.LIST
         }
+        _state.update { it.copy(viewMode = next) }
+        persistSetting { settingsRepository.setLibraryGridView(next == LibraryViewMode.GRID) }
     }
 
     fun setSortBy(by: FileSortBy) {
         if (by == _state.value.sort.by) return
+        val ascending = _state.value.sort.ascending
         _state.update { it.copy(sort = it.sort.copy(by = by)) }
+        persistSetting { settingsRepository.setSort(by, ascending) }
         reload()
     }
 
     fun setSortAscending(ascending: Boolean) {
         if (ascending == _state.value.sort.ascending) return
+        val by = _state.value.sort.by
         _state.update { it.copy(sort = it.sort.copy(ascending = ascending)) }
+        persistSetting { settingsRepository.setSort(by, ascending) }
         reload()
     }
 
     fun toggleShowHidden() {
-        _state.update { it.copy(showHidden = !it.showHidden) }
+        val next = !_state.value.showHidden
+        _state.update { it.copy(showHidden = next) }
+        persistSetting { settingsRepository.setShowHiddenFiles(next) }
         reload()
+    }
+
+    /** 异步持久化设置；失败时保留本次内存状态，下次启动回落到上次成功保存的值。 */
+    private fun persistSetting(operation: suspend () -> Unit) {
+        viewModelScope.launch {
+            runCatching { operation() }
+                .onFailure { Log.w(TAG, "保存文件库设置失败", it) }
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -467,6 +511,7 @@ class LibraryViewModel(
     )
 
     companion object {
+        private const val TAG = "LibraryViewModel"
         private const val PLAYLISTS_STOP_TIMEOUT_MS = 5_000L
 
         fun factory(application: Application): ViewModelProvider.Factory =

@@ -116,6 +116,7 @@ class TransferStorage(context: Context) {
         if (name.any { it.code < 0x20 || it.code == 0x7F }) return null
         if (DRIVE_PREFIX_REGEX.containsMatchIn(name)) return null
         if (name == TEMP_DIR_NAME) return null
+        if (name.startsWith(".write_probe_")) return null
 
         // 去掉尾部的空格和点，避免文件移动到 Windows 电脑时出现无法保存的名称。
         name = name.trimEnd(' ', '.')

@@ -1,6 +1,7 @@
 package com.bingbaihanji.flowplayer.feature.player
 
 import android.net.Uri
+import com.bingbaihanji.flowplayer.core.data.settings.SpeedMode
 import com.bingbaihanji.flowplayer.core.player.PlayMode
 import com.bingbaihanji.flowplayer.core.player.PlayerPlaybackState
 import com.bingbaihanji.flowplayer.core.player.PlayerQueueItem
@@ -19,6 +20,9 @@ interface PlayerUiSession {
     val state: StateFlow<PlayerPlaybackState>
     val isLocked: StateFlow<Boolean>
     val timerRemainingMs: StateFlow<Long?>
+
+    /** 设置页配置的倍速档位模式；仅作为本次菜单的初始档位，用户可在会话内临时切换。 */
+    val preferredSpeedMode: StateFlow<SpeedMode>
     val messages: Flow<String>
 
     val queue: List<PlayerQueueItem>

@@ -20,6 +20,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.bingbaihanji.flowplayer.MainActivity
 import com.bingbaihanji.flowplayer.R
+import com.bingbaihanji.flowplayer.core.data.settings.SettingsRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -72,6 +73,9 @@ class TransferService : Service() {
 
     private lateinit var storage: TransferStorage
 
+    /** 设置仓库：启动服务时读取/生成持久化传输 token。 */
+    private lateinit var settingsRepository: SettingsRepository
+
     @Volatile
     private var server: TransferServer? = null
 
@@ -95,6 +99,7 @@ class TransferService : Service() {
         // 必须最先进入前台：startForegroundService 只给 5 秒窗口。
         ensureForeground()
         storage = TransferStorage(this)
+        settingsRepository = SettingsRepository.from(this)
         _state.update {
             it.copy(
                 storagePath = storage.rootPath,
@@ -220,6 +225,11 @@ class TransferService : Service() {
         _state.update { it.copy(starting = true, running = false, error = null) }
         // startForeground 属于服务生命周期调用，统一回到主线程执行。
         withContext(Dispatchers.Main.immediate) { ensureForeground() }
+        if (!foregroundStarted) {
+            // 没有前台通知就不应继续跑 HTTP 服务，否则会被系统按后台服务清理。
+            failStart("无法创建前台通知，传输服务未启动")
+            return
+        }
         refreshNotification()
 
         // 没有局域网 IPv4 时启动也毫无意义，直接给出明确提示。
@@ -229,9 +239,28 @@ class TransferService : Service() {
             return
         }
 
+        // 优先复用持久化 token（重启后 PC 端保存的地址仍可用）；DataStore 读写失败时回退到临时 token。
+        // 当前在 serviceScope（Dispatchers.IO）中执行，挂起的 DataStore 操作不会阻塞主线程。
+        // 放在 acquireLocks 之前，避免挂起点跨过锁的获取/释放。
+        val token = try {
+            settingsRepository.ensureTransferToken().ifBlank { generateToken() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Exception) {
+            Log.w(TAG, "读取持久化传输令牌失败，回退到临时令牌", t)
+            generateToken()
+        }
+
         acquireLocks()
-        val token = generateToken()
-        val transferServer = TransferServer(this, storage, token) { refreshFiles() }
+        val transferServer = try {
+            TransferServer(this, storage, token) { refreshFiles() }
+        } catch (t: Throwable) {
+            // 兜底 Ktor 类在低版本 Android 上加载失败等异常，转成 UI 可见错误而不是崩溃。
+            Log.w(TAG, "创建传输服务器失败", t)
+            releaseLocks()
+            failStart("创建传输服务器失败：${describeThrowable(t)}")
+            return
+        }
 
         try {
             val actualPort = transferServer.start()
@@ -389,7 +418,11 @@ class TransferService : Service() {
             ?.hostAddress
     }
 
-    /** 每次启动生成新的 URL-safe 随机 token（无填充，可直接放进 URL query）。 */
+    /**
+     * 生成 URL-safe 随机 token（无填充，可直接放进 URL query）。
+     *
+     * 这是 M4 的临时 token 逻辑，仅在持久化 token 读取失败时作为回退使用。
+     */
     private fun generateToken(): String {
         val bytes = ByteArray(TOKEN_BYTES)
         secureRandom.nextBytes(bytes)
