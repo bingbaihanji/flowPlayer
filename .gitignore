@@ -17,5 +17,6 @@ local.properties
 # M1 additions
 /app/build/
 /.idea/
+/.kotlin/
 *.log
 *.hprof

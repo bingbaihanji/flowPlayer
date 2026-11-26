@@ -1,6 +1,5 @@
 package com.bingbaihanji.flowplayer.feature.history
 
-import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,6 +26,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.bingbaihanji.flowplayer.core.data.db.PlaybackHistoryEntity
+import com.bingbaihanji.flowplayer.core.player.PlaybackRequest
+import com.bingbaihanji.flowplayer.core.player.PlayerContract
+import com.bingbaihanji.flowplayer.core.player.PlayerLauncher
+import com.bingbaihanji.flowplayer.core.player.PlayerQueueItem
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -134,7 +137,23 @@ private fun HistoryRow(entry: PlaybackHistoryEntity) {
 
     Surface(
         onClick = {
-            Toast.makeText(context, "播放功能将在 M3 实现", Toast.LENGTH_SHORT).show()
+            // 点击历史条目：单条队列续播上次进度。
+            PlayerLauncher.start(
+                context,
+                PlaybackRequest(
+                    items = listOf(
+                        PlayerQueueItem(
+                            uri = PlayerContract.uriFor(entry.path),
+                            path = entry.path,
+                            title = displayTitle,
+                            mimeType = entry.mimeType,
+                            durationMs = entry.durationMs,
+                        ),
+                    ),
+                    startPositionMs = entry.positionMs.coerceAtLeast(0L),
+                    queueTitle = displayTitle,
+                ),
+            )
         },
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surface,

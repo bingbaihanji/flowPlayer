@@ -15,6 +15,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -55,7 +56,12 @@ import coil.ImageLoader
 import coil.compose.AsyncImage
 import com.bingbaihanji.flowplayer.core.common.permissions.hasStorageAccess
 import com.bingbaihanji.flowplayer.core.common.permissions.openAllFilesAccessSettings
+import com.bingbaihanji.flowplayer.core.data.db.PlaylistSummary
 import com.bingbaihanji.flowplayer.core.data.file.*
+import com.bingbaihanji.flowplayer.core.player.PlaybackRequest
+import com.bingbaihanji.flowplayer.core.player.PlayerContract
+import com.bingbaihanji.flowplayer.core.player.PlayerLauncher
+import com.bingbaihanji.flowplayer.core.player.PlayerQueueItem
 import com.bingbaihanji.flowplayer.feature.viewer.image.ImageViewerActivity
 import java.io.File
 import androidx.compose.foundation.lazy.grid.items as gridItems
@@ -67,10 +73,12 @@ fun LibraryScreen() {
     val application = context.applicationContext as Application
     val viewModel: LibraryViewModel = viewModel(factory = LibraryViewModel.factory(application))
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val playlists by viewModel.playlists.collectAsStateWithLifecycle()
     val imageLoader = remember(context) { LibraryImageLoader.get(context) }
 
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var actionTarget by remember { mutableStateOf<MediaFile?>(null) }
+    var addToPlaylistTarget by remember { mutableStateOf<MediaFile?>(null) }
     var renameTarget by remember { mutableStateOf<MediaFile?>(null) }
     var deleteTarget by remember { mutableStateOf<MediaFile?>(null) }
 
@@ -128,7 +136,30 @@ fun LibraryScreen() {
                 launchImageViewer(context, file, siblings, viewerTitle)
             }
 
-            else -> Toast.makeText(context, "播放器将在 M3 实现", Toast.LENGTH_SHORT).show()
+            file.kind == MediaKind.VIDEO || file.kind == MediaKind.AUDIO -> {
+                // 同类型（视频/音频）的非目录文件构成播放队列，点击项作为起始位置。
+                val queue = state.files.filter { it.kind == file.kind && !it.isDirectory }
+                val index = queue.indexOf(file).coerceAtLeast(0)
+                val items = queue.map { media ->
+                    PlayerQueueItem(
+                        uri = PlayerContract.uriFor(media.path, media.contentUri),
+                        path = media.path,
+                        title = media.title,
+                        mimeType = media.mimeType.orEmpty(),
+                        durationMs = media.durationMs ?: 0L,
+                    )
+                }
+                PlayerLauncher.start(
+                    context,
+                    PlaybackRequest(
+                        items = items,
+                        startIndex = index,
+                        queueTitle = libraryQueueTitle(state),
+                    ),
+                )
+            }
+
+            else -> Toast.makeText(context, "暂不支持该文件类型", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -218,6 +249,17 @@ fun LibraryScreen() {
 
     val actionFile = actionTarget
     if (actionFile != null) {
+        val addToPlaylistAction: (() -> Unit)? = if (
+            !actionFile.isDirectory &&
+            (actionFile.kind == MediaKind.VIDEO || actionFile.kind == MediaKind.AUDIO)
+        ) {
+            {
+                actionTarget = null
+                addToPlaylistTarget = actionFile
+            }
+        } else {
+            null
+        }
         FileActionDialog(
             file = actionFile,
             onDismiss = { actionTarget = null },
@@ -228,6 +270,19 @@ fun LibraryScreen() {
             onDelete = {
                 actionTarget = null
                 deleteTarget = actionFile
+            },
+            onAddToPlaylist = addToPlaylistAction,
+        )
+    }
+
+    addToPlaylistTarget?.let { target ->
+        AddToPlaylistDialog(
+            file = target,
+            playlists = playlists,
+            onDismiss = { addToPlaylistTarget = null },
+            onSelect = { playlistId ->
+                addToPlaylistTarget = null
+                viewModel.addToPlaylist(target, playlistId)
             },
         )
     }
@@ -1547,6 +1602,7 @@ private fun FileActionDialog(
     onDismiss: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
+    onAddToPlaylist: (() -> Unit)?,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1561,6 +1617,16 @@ private fun FileActionDialog(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Spacer(Modifier.height(8.dp))
+                if (onAddToPlaylist != null) {
+                    TextButton(
+                        onClick = onAddToPlaylist,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.PlaylistPlay, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("加入播放列表")
+                    }
+                }
                 TextButton(
                     onClick = onRename,
                     modifier = Modifier.fillMaxWidth(),
@@ -1580,6 +1646,80 @@ private fun FileActionDialog(
                     )
                     Spacer(Modifier.width(8.dp))
                     Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
+}
+
+/**
+ * 选择目标播放列表。列表为空时提示先去播放列表页创建。
+ */
+@Composable
+private fun AddToPlaylistDialog(
+    file: MediaFile,
+    playlists: List<PlaylistSummary>,
+    onDismiss: () -> Unit,
+    onSelect: (Long) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("加入播放列表") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = file.title,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(8.dp))
+                if (playlists.isEmpty()) {
+                    Text(
+                        text = "还没有播放列表，请先在「播放列表」页创建。",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 320.dp)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        playlists.forEach { playlist ->
+                            TextButton(
+                                onClick = { onSelect(playlist.id) },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.PlaylistPlay,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = playlist.name,
+                                    modifier = Modifier.weight(1f, fill = false),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = "${playlist.itemCount} 个",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
                 }
             }
         },
@@ -1781,6 +1921,19 @@ private fun summaryText(state: LibraryUiState): String {
 
 private fun viewerTitle(state: LibraryUiState): String = when (val location = state.location) {
     is LibraryLocation.Root -> "图片"
+    is LibraryLocation.Bucket -> location.bucketName
+    is LibraryLocation.Directory -> {
+        if (state.storageRootPath.isNotBlank() && location.path == state.storageRootPath) {
+            "内部存储"
+        } else {
+            directoryDisplayName(location.path)
+        }
+    }
+}
+
+/** 播放队列标题：根视图用媒体类型，相册/目录用当前位置名称。 */
+private fun libraryQueueTitle(state: LibraryUiState): String = when (val location = state.location) {
+    is LibraryLocation.Root -> kindLabel(state.kind)
     is LibraryLocation.Bucket -> location.bucketName
     is LibraryLocation.Directory -> {
         if (state.storageRootPath.isNotBlank() && location.path == state.storageRootPath) {

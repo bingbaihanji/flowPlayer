@@ -18,6 +18,11 @@ android {
         versionCode = 1
         versionName = "1.0"
 
+        // 原版仅提供 arm64-v8a；LibVLC AAR 含四套 ABI，先按 arm64 打包控制体积。
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -71,6 +76,13 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)
     implementation(libs.coil.video)
+
+    implementation(libs.media3.exoplayer)
+    implementation(libs.media3.session)
+    implementation(libs.media3.ui)
+
+    implementation(libs.libvlc.all)
+    implementation(libs.androidx.media)
 
     debugImplementation(libs.compose.ui.tooling)
 

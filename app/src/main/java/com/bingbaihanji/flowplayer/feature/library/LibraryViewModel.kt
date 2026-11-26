@@ -6,7 +6,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.bingbaihanji.flowplayer.core.common.permissions.hasStorageAccess
+import com.bingbaihanji.flowplayer.core.data.db.PlaylistSummary
 import com.bingbaihanji.flowplayer.core.data.file.*
+import com.bingbaihanji.flowplayer.core.data.repository.PlaylistRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -36,6 +38,16 @@ class LibraryViewModel(
 
     private val _messages = Channel<String>(Channel.BUFFERED)
     val messages: Flow<String> = _messages.receiveAsFlow()
+
+    private val playlistRepository = PlaylistRepository.from(application)
+
+    /** 供“加入播放列表”对话框选择的播放列表。 */
+    val playlists: StateFlow<List<PlaylistSummary>> = playlistRepository.observePlaylists()
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(PLAYLISTS_STOP_TIMEOUT_MS),
+            emptyList(),
+        )
 
     private val backStack = ArrayDeque<LibraryLocation>()
     private var loadJob: Job? = null
@@ -292,6 +304,30 @@ class LibraryViewModel(
         }
     }
 
+    /**
+     * 把视频/音频加入指定播放列表。同一列表内重复 path 由仓库替换旧条目。
+     */
+    fun addToPlaylist(file: MediaFile, playlistId: Long) {
+        if (file.isDirectory) return
+        viewModelScope.launch {
+            val result = runCatching {
+                playlistRepository.addItem(
+                    playlistId = playlistId,
+                    path = file.path,
+                    title = file.title,
+                    mimeType = file.mimeType.orEmpty(),
+                    durationMs = file.durationMs ?: 0L,
+                    size = file.size,
+                )
+            }
+            result.onSuccess {
+                _messages.trySend("已加入播放列表")
+            }.onFailure { error ->
+                _messages.trySend(error.message ?: "加入播放列表失败")
+            }
+        }
+    }
+
     // ---------------------------------------------------------------------------------------------
     // 加载
     // ---------------------------------------------------------------------------------------------
@@ -431,6 +467,8 @@ class LibraryViewModel(
     )
 
     companion object {
+        private const val PLAYLISTS_STOP_TIMEOUT_MS = 5_000L
+
         fun factory(application: Application): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
