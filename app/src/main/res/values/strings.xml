@@ -1,3 +1,16 @@
 <resources>
     <string name="app_name">FlowPlayer</string>
+    <string name="tab_library">本地媒体</string>
+    <string name="tab_playlist">播放列表</string>
+    <string name="tab_history">播放记录</string>
+    <string name="tab_more">更多</string>
+    <string name="action_back">返回</string>
+    <string name="library_title">本地媒体</string>
+    <string name="playlist_title">播放列表</string>
+    <string name="history_title">播放记录</string>
+    <string name="more_title">更多</string>
+    <string name="settings_title">设置</string>
+    <string name="transfer_title">接收文件</string>
+    <string name="more_transfer">接收文件（M4 实现）</string>
+    <string name="more_settings">设置（M5 实现）</string>
 </resources>
