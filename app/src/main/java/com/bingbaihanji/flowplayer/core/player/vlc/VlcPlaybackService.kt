@@ -431,6 +431,22 @@ class VlcPlaybackService : Service() {
             onResult(Result.failure(IllegalStateException("字幕加载失败：格式可能不受支持")))
             return
         }
+        runCatching {
+            val spuTracks = mp.spuTracks
+            Log.d(
+                TAG,
+                "外挂字幕已添加：spuCount=${mp.spuTracksCount}, current=${mp.spuTrack}, " +
+                    "tracks=${spuTracks?.joinToString { "${it.id}:${it.name}" }}",
+            )
+        }.onFailure { Log.d(TAG, "读取 SPU 轨失败", it) }
+        // LibVLC 在播放中 addSlave 后会重建视频输出，部分设备上画面会变黑；重新挂载视图恢复渲染。
+        val layout = attachedLayout
+        if (layout != null) {
+            runCatching { mp.detachViews() }
+            videoAttached = false
+            attachedLayout = null
+            attachVideo(layout)
+        }
         publishState(updateNotification = false)
         onResult(Result.success(Unit))
     }
@@ -513,8 +529,8 @@ class VlcPlaybackService : Service() {
             videoAttached = false
             attachedLayout = null
         }
-        // 第 3 个参数必须为 true：启用 LibVLC 的字幕 surface，否则内嵌/外挂字幕不会渲染。
-        // 第 4 个参数保持 false，继续使用默认 SurfaceView 渲染视频。
+        // 第 3 个参数 subtitles=true 创建独立的字幕 Surface。
+        // 第 4 个参数是 textureView，false 表示使用 SurfaceView 渲染视频（TextureView 分支不会创建字幕 Surface）。
         val result = runCatching { mp.attachViews(layout, null, true, false) }
         if (result.isFailure) {
             val error = result.exceptionOrNull() ?: IllegalStateException()
@@ -527,6 +543,16 @@ class VlcPlaybackService : Service() {
         }
         videoAttached = true
         attachedLayout = layout
+        val subtitleView: android.view.View? = layout.findViewById(org.videolan.R.id.surface_subtitles)
+        Log.d(TAG, "字幕 Surface 挂载：${subtitleView?.let { "${it.javaClass.simpleName}:${it.width}x${it.height}" }}")
+        layout.post {
+            val view = layout.findViewById<android.view.View>(org.videolan.R.id.surface_subtitles)
+            Log.d(
+                TAG,
+                "字幕 Surface 布局：${view?.let { "${it.width}x${it.height}, " +
+                    "lp=${it.layoutParams?.width}x${it.layoutParams?.height}" }}",
+            )
+        }
         applyVideoScale()
     }
 
@@ -590,7 +616,10 @@ class VlcPlaybackService : Service() {
             currentMedia = null
             closeCurrentFileDescriptor()
             val media = openMedia(vlc, item)
-            media.setHWDecoderEnabled(true, false)
+            // AVI 常见 MJPEG 编码，硬件解码在外部字幕/重连时容易失败；这类文件改用软件解码更稳。
+            val isAvi = item.path.substringAfterLast('.', "").equals("avi", ignoreCase = true) ||
+                item.uri.substringAfterLast('.', "").equals("avi", ignoreCase = true)
+            media.setHWDecoderEnabled(!isAvi, false)
             currentMedia = media
             mp.setMedia(media)
         }

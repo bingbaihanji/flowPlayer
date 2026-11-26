@@ -304,6 +304,10 @@ class VlcPlayerViewModel(
             val mimeType = PlayerContract.subtitleMimeFor(displayName)
                 ?: PlayerContract.subtitleMimeFor(uri.lastPathSegment.orEmpty())
                 ?: resolverSubtitleMime(uri)
+            android.util.Log.d(
+                "VlcPlayerViewModel",
+                "外挂字幕导入：uri=$uri, name=$displayName, mime=$mimeType",
+            )
             if (mimeType == null) {
                 messageChannel.trySend("字幕导入失败：仅支持 SRT/VTT/ASS/SSA")
                 return@launch
