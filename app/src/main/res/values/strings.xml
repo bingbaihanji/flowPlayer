@@ -11,6 +11,4 @@
     <string name="more_title">更多</string>
     <string name="settings_title">设置</string>
     <string name="transfer_title">接收文件</string>
-    <string name="more_transfer">接收文件（M4 实现）</string>
-    <string name="more_settings">设置（M5 实现）</string>
 </resources>

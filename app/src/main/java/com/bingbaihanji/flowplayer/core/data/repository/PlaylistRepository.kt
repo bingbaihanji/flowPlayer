@@ -85,6 +85,13 @@ class PlaylistRepository(private val database: AppDatabase) {
     }
 
     /**
+     * 文件被删除后清理所有播放列表中指向该路径的条目。
+     */
+    suspend fun removeItemsByPath(path: String) {
+        itemDao.deleteByPath(path)
+    }
+
+    /**
      * 将条目在列表内上移/下移 [offset] 位（-1 上移，1 下移）。
      */
     suspend fun moveItem(playlistId: Long, itemId: Long, offset: Int) {

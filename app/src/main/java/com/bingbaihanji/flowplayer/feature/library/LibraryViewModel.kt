@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.bingbaihanji.flowplayer.core.common.permissions.hasStorageAccess
 import com.bingbaihanji.flowplayer.core.data.db.PlaylistSummary
 import com.bingbaihanji.flowplayer.core.data.file.*
+import com.bingbaihanji.flowplayer.core.data.repository.HistoryRepository
 import com.bingbaihanji.flowplayer.core.data.repository.PlaylistRepository
 import com.bingbaihanji.flowplayer.core.data.settings.SettingsRepository
 import kotlinx.coroutines.CancellationException
@@ -42,6 +43,7 @@ class LibraryViewModel(
     val messages: Flow<String> = _messages.receiveAsFlow()
 
     private val playlistRepository = PlaylistRepository.from(application)
+    private val historyRepository = HistoryRepository.from(application)
     private val settingsRepository = SettingsRepository.from(application)
 
     /** 供“加入播放列表”对话框选择的播放列表。 */
@@ -340,6 +342,7 @@ class LibraryViewModel(
         viewModelScope.launch {
             val result = repository.delete(file)
             if (result.isSuccess) {
+                removeFileReferences(file.path)
                 _messages.trySend("已删除")
                 reload()
             } else {
@@ -361,6 +364,7 @@ class LibraryViewModel(
                 val result = repository.delete(file)
                 if (result.isSuccess) {
                     success++
+                    removeFileReferences(file.path)
                 } else {
                     failed++
                     if (firstError == null) {
@@ -376,6 +380,16 @@ class LibraryViewModel(
             _messages.trySend(message)
             reload()
         }
+    }
+
+    /**
+     * 文件删除成功后同步清理播放列表与播放历史中的失效条目。
+     */
+    private suspend fun removeFileReferences(path: String) {
+        runCatching { playlistRepository.removeItemsByPath(path) }
+            .onFailure { Log.w(TAG, "清理播放列表条目失败：$path", it) }
+        runCatching { historyRepository.removeByPath(path) }
+            .onFailure { Log.w(TAG, "清理播放历史失败：$path", it) }
     }
 
     /**

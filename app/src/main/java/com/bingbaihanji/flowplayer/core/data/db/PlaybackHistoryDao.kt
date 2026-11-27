@@ -24,6 +24,10 @@ interface PlaybackHistoryDao {
     @Query("DELETE FROM playback_history WHERE id = :id")
     suspend fun deleteById(id: Long)
 
+    /** 文件被删除后清理对应的播放历史。 */
+    @Query("DELETE FROM playback_history WHERE path = :path")
+    suspend fun deleteByPath(path: String)
+
     @Query("DELETE FROM playback_history")
     suspend fun clear()
 }

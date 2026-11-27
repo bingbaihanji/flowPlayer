@@ -44,6 +44,13 @@ class HistoryRepository(database: AppDatabase) {
         historyDao.deleteById(id)
     }
 
+    /**
+     * 文件被删除后清理对应的播放历史。
+     */
+    suspend fun removeByPath(path: String) {
+        historyDao.deleteByPath(path)
+    }
+
     suspend fun clear() {
         historyDao.clear()
     }

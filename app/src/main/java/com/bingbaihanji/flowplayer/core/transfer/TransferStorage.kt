@@ -1,6 +1,7 @@
 package com.bingbaihanji.flowplayer.core.transfer
 
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.os.Environment
 import android.os.StatFs
 import android.util.Log
@@ -24,11 +25,13 @@ import java.util.UUID
  */
 class TransferStorage(context: Context) {
 
+    private val appContext: Context = context.applicationContext
+
     /** 重名文件检查与 rename 的互斥锁，避免并发上传选中同一个目标名。 */
     private val nameLock = Any()
 
     /** 实际使用的传输根目录（构造时确定，避免运行中路径漂移）。 */
-    val root: File = resolveRoot(context.applicationContext)
+    val root: File = resolveRoot(appContext)
 
     val rootPath: String
         get() = root.absolutePath
@@ -148,29 +151,31 @@ class TransferStorage(context: Context) {
         val safeName = sanitizeFileName(rawName) ?: throw IOException("文件名不合法")
         if (!root.exists() && !root.mkdirs()) throw IOException("无法创建传输目录")
 
-        synchronized(nameLock) {
+        val target = synchronized(nameLock) {
             val (stem, extension) = splitExtension(safeName)
-            var target = File(root, safeName)
+            var candidate = File(root, safeName)
             var index = 1
-            while (target.exists()) {
+            while (candidate.exists()) {
                 if (index > MAX_RENAME_ATTEMPTS) throw IOException("同名文件过多，无法保存")
-                target = File(root, buildSuffixedName(stem, extension, index))
+                candidate = File(root, buildSuffixedName(stem, extension, index))
                 index++
             }
 
-            val renamed = temp.renameTo(target)
-            if (renamed) return target
-
-            // 极少数文件系统不支持 rename 时退化为复制；失败会删除残留目标文件。
-            try {
-                temp.copyTo(target, overwrite = false)
-                temp.delete()
-            } catch (t: Throwable) {
-                target.delete()
-                throw IOException("保存文件失败：$safeName", t)
+            val renamed = temp.renameTo(candidate)
+            if (!renamed) {
+                // 极少数文件系统不支持 rename 时退化为复制；失败会删除残留目标文件。
+                try {
+                    temp.copyTo(candidate, overwrite = false)
+                    temp.delete()
+                } catch (t: Throwable) {
+                    candidate.delete()
+                    throw IOException("保存文件失败：$safeName", t)
+                }
             }
-            return target
+            candidate
         }
+        scanMediaStore(target)
+        return target
     }
 
     // ---------------------------------------------------------------- 路径校验 / 删除
@@ -211,10 +216,39 @@ class TransferStorage(context: Context) {
         }
         return try {
             val deleted = target.delete()
-            if (!deleted) Log.w(TAG, "删除文件失败：${file.path}")
+            if (deleted) {
+                // 删除成功后通知媒体库，避免本地媒体相册残留已删除的条目。
+                scanMediaStore(target)
+            } else {
+                Log.w(TAG, "删除文件失败：${file.path}")
+            }
             deleted
         } catch (t: Throwable) {
             Log.w(TAG, "删除文件失败：${file.path}", t)
+            false
+        }
+    }
+
+    /**
+     * 上传/删除后主动通知 MediaStore：新文件立即出现在本地媒体相册，
+     * 删除的文件同步移除媒体库条目。应用私有目录不参与媒体库索引，直接跳过。
+     */
+    private fun scanMediaStore(file: File) {
+        if (!isPublicMediaStorage()) return
+        runCatching {
+            MediaScannerConnection.scanFile(appContext, arrayOf(file.absolutePath), null, null)
+        }.onFailure { Log.w(TAG, "通知媒体库失败：${file.absolutePath}", it) }
+    }
+
+    private fun isPublicMediaStorage(): Boolean {
+        return try {
+            val externalRoot = Environment.getExternalStorageDirectory().canonicalFile
+            val privateRoot = File(externalRoot, "Android").canonicalFile
+            val rootPath = root.canonicalPath
+            rootPath.startsWith(externalRoot.path + File.separator) &&
+                !rootPath.startsWith(privateRoot.path + File.separator)
+        } catch (t: Throwable) {
+            Log.w(TAG, "判断传输目录位置失败", t)
             false
         }
     }

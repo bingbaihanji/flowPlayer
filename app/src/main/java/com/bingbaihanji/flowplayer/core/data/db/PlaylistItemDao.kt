@@ -29,4 +29,8 @@ interface PlaylistItemDao {
 
     @Query("DELETE FROM playlist_item WHERE id = :itemId")
     suspend fun deleteById(itemId: Long)
+
+    /** 文件被删除后清理所有播放列表中指向该路径的条目。 */
+    @Query("DELETE FROM playlist_item WHERE path = :path")
+    suspend fun deleteByPath(path: String)
 }

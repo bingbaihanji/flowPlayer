@@ -94,6 +94,7 @@ import com.bingbaihanji.flowplayer.core.player.PlayerLauncher
 import com.bingbaihanji.flowplayer.core.player.PlayerQueueItem
 import com.bingbaihanji.flowplayer.core.transfer.TransferFile
 import com.bingbaihanji.flowplayer.core.transfer.TransferState
+import com.bingbaihanji.flowplayer.feature.viewer.image.ImageViewerActivity
 import kotlinx.coroutines.launch
 
 private val WifiWarningContainer = Color(0xFFFFF6E7)
@@ -953,11 +954,16 @@ private fun hasNotificationPermission(context: Context): Boolean {
 }
 
 /**
- * 列表项点击：视频/音频交给应用内播放器；图片等通过系统 ACTION_VIEW 打开。
- * 普通文件路径不能直接以 file:// 暴露给其它应用，先经 MediaScanner 换成 content://；
- * 换不到时提示无法打开，避免触发 FileUriExposedException。
+ * 列表项点击：视频/音频交给应用内播放器，图片交给应用内查看器；
+ * 其余文件通过系统 ACTION_VIEW 打开。普通文件路径不能直接以 file:// 暴露给
+ * 其它应用，先经 MediaScanner 换成 content://；换不到时提示无法打开，
+ * 避免触发 FileUriExposedException。
  */
 private fun openTransferFile(context: Context, file: TransferFile, files: List<TransferFile>) {
+    if (transferFileIsImage(file)) {
+        openInImageViewer(context, file, files)
+        return
+    }
     val isVideo = transferFileIsVideo(file)
     val isAudio = transferFileIsAudio(file)
     if (isVideo || isAudio) {
@@ -965,6 +971,40 @@ private fun openTransferFile(context: Context, file: TransferFile, files: List<T
         return
     }
     openWithSystem(context, file, transferFileMime(file))
+}
+
+/** 单次传给图片查看器的路径上限，避免大目录触发 TransactionTooLargeException。 */
+private const val MAX_TRANSFER_IMAGE_PATHS = 500
+
+private fun openInImageViewer(
+    context: Context,
+    file: TransferFile,
+    files: List<TransferFile>,
+) {
+    val images = files.filter { transferFileIsImage(it) }.ifEmpty { listOf(file) }
+    val clickedIndex = images.indexOfFirst { it.path == file.path }.coerceAtLeast(0)
+    val windowStart = if (images.size <= MAX_TRANSFER_IMAGE_PATHS) {
+        0
+    } else {
+        (clickedIndex - MAX_TRANSFER_IMAGE_PATHS / 2)
+            .coerceIn(0, images.size - MAX_TRANSFER_IMAGE_PATHS)
+    }
+    val windowEnd = minOf(images.size, windowStart + MAX_TRANSFER_IMAGE_PATHS)
+    val visibleImages = images.subList(windowStart, windowEnd)
+    val paths = ArrayList<String>(visibleImages.size)
+    visibleImages.forEach { paths.add(it.path) }
+    val index = (clickedIndex - windowStart)
+        .coerceIn(0, (paths.size - 1).coerceAtLeast(0))
+    val intent = Intent(context, ImageViewerActivity::class.java).apply {
+        putStringArrayListExtra(ImageViewerActivity.EXTRA_PATHS, paths)
+        putExtra(ImageViewerActivity.EXTRA_INDEX, index)
+        putExtra(ImageViewerActivity.EXTRA_TITLE, "接收文件")
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching { context.startActivity(intent) }
+        .onFailure {
+            Toast.makeText(context, "无法打开图片查看器", Toast.LENGTH_SHORT).show()
+        }
 }
 
 private fun openInPlayer(
