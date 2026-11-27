@@ -67,6 +67,12 @@ class PlayerController(context: Context) {
     private var pendingPlayMode: PlayMode? = null
     private var pendingSpeed: Float? = null
 
+    /**
+     * 控制器当前选择的播放模式。PAUSE_AT_END 与顺序播放都表现为
+     * repeatMode=OFF、shuffle=false，无法从播放器状态反推，需要单独记录。
+     */
+    private var appliedPlayMode = PlayMode.SEQUENTIAL
+
     private val playerListener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
             refreshState()
@@ -272,6 +278,7 @@ class PlayerController(context: Context) {
     }
 
     fun setPlayMode(mode: PlayMode) {
+        appliedPlayMode = mode
         _state.update { it.copy(playMode = mode) }
         val player = controller
         if (player == null) {
@@ -394,7 +401,7 @@ class PlayerController(context: Context) {
             .build()
     }
 
-    private fun applyPlayMode(player: Player, mode: PlayMode) {
+    private fun applyPlayMode(player: MediaController, mode: PlayMode) {
         when (mode) {
             PlayMode.SEQUENTIAL -> {
                 player.repeatMode = Player.REPEAT_MODE_OFF
@@ -410,6 +417,25 @@ class PlayerController(context: Context) {
                 player.repeatMode = Player.REPEAT_MODE_ALL
                 player.shuffleModeEnabled = true
             }
+
+            PlayMode.PAUSE_AT_END -> {
+                player.repeatMode = Player.REPEAT_MODE_OFF
+                player.shuffleModeEnabled = false
+            }
+        }
+        // ExoPlayer 只在 Player 接口之外暴露该能力，需要经服务端自定义命令设置。
+        setPauseAtEnd(player, mode == PlayMode.PAUSE_AT_END)
+    }
+
+    private fun setPauseAtEnd(player: MediaController, enabled: Boolean) {
+        val args = Bundle().apply {
+            putBoolean(PlayerSessionCommand.KEY_PAUSE_AT_END, enabled)
+        }
+        runCatching {
+            player.sendCustomCommand(
+                SessionCommand(PlayerSessionCommand.ACTION_SET_PAUSE_AT_END, Bundle.EMPTY),
+                args,
+            )
         }
     }
 
@@ -447,6 +473,7 @@ class PlayerController(context: Context) {
         val mode = when {
             player.shuffleModeEnabled -> PlayMode.SHUFFLE
             player.repeatMode == Player.REPEAT_MODE_ONE -> PlayMode.REPEAT_ONE
+            appliedPlayMode == PlayMode.PAUSE_AT_END -> PlayMode.PAUSE_AT_END
             else -> PlayMode.SEQUENTIAL
         }
         val videoSize = player.videoSize

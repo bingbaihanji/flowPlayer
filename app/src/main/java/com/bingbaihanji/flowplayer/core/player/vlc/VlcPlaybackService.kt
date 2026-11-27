@@ -335,6 +335,7 @@ class VlcPlaybackService : Service() {
             PlayMode.SEQUENTIAL -> currentIndex + 1
             PlayMode.REPEAT_ONE -> if (currentIndex + 1 < queue.size) currentIndex + 1 else currentIndex
             PlayMode.SHUFFLE -> randomOtherIndex()
+            PlayMode.PAUSE_AT_END -> currentIndex + 1
         }
         if (target !in queue.indices) return
         loadItem(target, 0L, autoPlay = shouldPlay)
@@ -350,6 +351,7 @@ class VlcPlaybackService : Service() {
             PlayMode.SEQUENTIAL -> currentIndex - 1
             PlayMode.REPEAT_ONE -> if (currentIndex > 0) currentIndex - 1 else currentIndex
             PlayMode.SHUFFLE -> randomOtherIndex()
+            PlayMode.PAUSE_AT_END -> currentIndex - 1
         }
         if (target !in queue.indices) return
         loadItem(target, 0L, autoPlay = shouldPlay)
@@ -697,6 +699,9 @@ class VlcPlaybackService : Service() {
             PlayMode.REPEAT_ONE -> currentIndex
             PlayMode.SHUFFLE ->
                 if (queue.isEmpty()) null else randomOtherIndex()
+
+            // 播完当前项即暂停，不自动续播下一项。
+            PlayMode.PAUSE_AT_END -> null
         }
         if (nextIndex == null || nextIndex !in queue.indices) {
             playWhenReady = false
@@ -944,12 +949,14 @@ class VlcPlaybackService : Service() {
         PlayMode.SEQUENTIAL -> currentIndex + 1 < queue.size
         PlayMode.REPEAT_ONE -> queue.isNotEmpty()
         PlayMode.SHUFFLE -> queue.size > 1
+        PlayMode.PAUSE_AT_END -> currentIndex + 1 < queue.size
     }
 
     private fun canPlayPrevious(): Boolean = when (playMode) {
         PlayMode.SEQUENTIAL -> currentIndex > 0
         PlayMode.REPEAT_ONE -> queue.isNotEmpty()
         PlayMode.SHUFFLE -> queue.size > 1
+        PlayMode.PAUSE_AT_END -> currentIndex > 0
     }
 
     /**

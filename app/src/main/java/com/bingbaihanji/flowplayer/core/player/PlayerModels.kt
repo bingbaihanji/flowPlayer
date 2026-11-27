@@ -1,12 +1,15 @@
 package com.bingbaihanji.flowplayer.core.player
 
 /**
- * 播放模式。与设置页的三项保持一致。
+ * 播放模式。与设置页的四项保持一致。
  */
 enum class PlayMode(val label: String) {
     SEQUENTIAL("顺序播放"),
     REPEAT_ONE("单曲循环"),
     SHUFFLE("随机播放"),
+
+    /** 当前音视频播放结束后暂停，不自动切到下一项。 */
+    PAUSE_AT_END("播放完暂停"),
 }
 
 /**

@@ -156,6 +156,7 @@ class PlaybackService : MediaSessionService() {
             val availableSessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS
                 .buildUpon()
                 .add(SessionCommand(PlayerSessionCommand.ACTION_SET_EXTERNAL_SUBTITLE, Bundle.EMPTY))
+                .add(SessionCommand(PlayerSessionCommand.ACTION_SET_PAUSE_AT_END, Bundle.EMPTY))
                 .build()
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                 .setAvailableSessionCommands(availableSessionCommands)
@@ -175,18 +176,37 @@ class PlaybackService : MediaSessionService() {
             customCommand: SessionCommand,
             args: Bundle,
         ): ListenableFuture<SessionResult> {
-            if (customCommand.customAction != PlayerSessionCommand.ACTION_SET_EXTERNAL_SUBTITLE) {
-                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_NOT_SUPPORTED))
+            return when (customCommand.customAction) {
+                PlayerSessionCommand.ACTION_SET_EXTERNAL_SUBTITLE -> {
+                    val uriString = args.getString(PlayerSessionCommand.KEY_SUBTITLE_URI)
+                    val mimeType = args.getString(PlayerSessionCommand.KEY_SUBTITLE_MIME)
+                    val success = if (uriString.isNullOrBlank()) {
+                        false
+                    } else {
+                        runCatching { applyExternalSubtitle(Uri.parse(uriString), mimeType) }
+                            .getOrDefault(false)
+                    }
+                    val resultCode = if (success) {
+                        SessionResult.RESULT_SUCCESS
+                    } else {
+                        SessionResult.RESULT_ERROR_UNKNOWN
+                    }
+                    Futures.immediateFuture(SessionResult(resultCode))
+                }
+
+                PlayerSessionCommand.ACTION_SET_PAUSE_AT_END -> {
+                    if (!::player.isInitialized) {
+                        Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_UNKNOWN))
+                    } else {
+                        player.setPauseAtEndOfMediaItems(
+                            args.getBoolean(PlayerSessionCommand.KEY_PAUSE_AT_END),
+                        )
+                        Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                    }
+                }
+
+                else -> Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_NOT_SUPPORTED))
             }
-            val uriString = args.getString(PlayerSessionCommand.KEY_SUBTITLE_URI)
-            val mimeType = args.getString(PlayerSessionCommand.KEY_SUBTITLE_MIME)
-            val success = if (uriString.isNullOrBlank()) {
-                false
-            } else {
-                runCatching { applyExternalSubtitle(Uri.parse(uriString), mimeType) }.getOrDefault(false)
-            }
-            val resultCode = if (success) SessionResult.RESULT_SUCCESS else SessionResult.RESULT_ERROR_UNKNOWN
-            return Futures.immediateFuture(SessionResult(resultCode))
         }
     }
 
