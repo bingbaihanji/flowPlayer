@@ -172,7 +172,8 @@ class FileRepositoryImpl(private val context: Context) : FileRepository {
         val spec = collectionSpec(kind) ?: return@withContext emptyList()
         val selection: String
         val selectionArgs: Array<String>?
-        if (bucketId < 0L) {
+        // MediaStore 的 bucket_id 本身可能为负数（哈希结果），只有哨兵值才表示“无 bucket”。
+        if (bucketId == UNKNOWN_BUCKET_ID) {
             selection = "bucket_id IS NULL"
             selectionArgs = null
         } else {
