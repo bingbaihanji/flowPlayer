@@ -22,6 +22,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.bingbaihanji.flowplayer.feature.history.HistoryScreen
 import com.bingbaihanji.flowplayer.feature.library.LibraryScreen
+import com.bingbaihanji.flowplayer.feature.more.AboutScreen
 import com.bingbaihanji.flowplayer.feature.more.MoreScreen
 import com.bingbaihanji.flowplayer.feature.playlist.PlaylistScreen
 import com.bingbaihanji.flowplayer.feature.settings.SettingsScreen
@@ -81,8 +82,9 @@ fun AppRoot() {
             composable(TopDestination.History.route) { HistoryScreen() }
             composable(TopDestination.More.route) {
                 MoreScreen(
-                    onOpenTransfer = { navController.navigate("transfer") },
                     onOpenSettings = { navController.navigate("settings") },
+                    onOpenTransfer = { navController.navigate("transfer") },
+                    onOpenAbout = { navController.navigate("about") },
                 )
             }
             composable("transfer") {
@@ -90,6 +92,9 @@ fun AppRoot() {
             }
             composable("settings") {
                 SettingsScreen(onBack = { navController.popBackStack() })
+            }
+            composable("about") {
+                AboutScreen(onBack = { navController.popBackStack() })
             }
         }
     }
