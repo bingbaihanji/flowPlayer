@@ -1,7 +1,12 @@
 package com.bingbaihanji.flowplayer.feature.more
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.widget.Toast
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -130,6 +135,7 @@ fun AboutScreen(onBack: () -> Unit) {
                     )
                 }
             }
+            AuthorInfoCard()
             Text(
                 text = "仅供个人学习与本地使用",
                 style = MaterialTheme.typography.labelSmall,
@@ -137,4 +143,62 @@ fun AboutScreen(onBack: () -> Unit) {
             )
         }
     }
+}
+
+/**
+ * 底部作者信息与开源地址；邮箱与 GitHub 地址可点击跳转。
+ */
+@Composable
+private fun AuthorInfoCard() {
+    val context = LocalContext.current
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "作者信息",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = "作者：bingbaihanji",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                text = "邮箱：bingbaihanji@gmail.com",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.clickable {
+                    openUri(context, Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:bingbaihanji@gmail.com")))
+                },
+            )
+            Text(
+                text = "QQ：2761868857",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                text = "开源地址",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "https://github.com/bingbaihanji/flowPlayer.git",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.clickable {
+                    openUri(
+                        context,
+                        Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/bingbaihanji/flowPlayer.git")),
+                    )
+                },
+            )
+        }
+    }
+}
+
+private fun openUri(context: Context, intent: Intent) {
+    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(intent) }
+        .onFailure { Toast.makeText(context, "无法打开链接", Toast.LENGTH_SHORT).show() }
 }
