@@ -15,8 +15,8 @@ android {
         applicationId = "com.bingbaihanji.flowplayer"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
 
         // 原版仅提供 arm64-v8a；LibVLC AAR 含四套 ABI，先按 arm64 打包控制体积。
         ndk {
