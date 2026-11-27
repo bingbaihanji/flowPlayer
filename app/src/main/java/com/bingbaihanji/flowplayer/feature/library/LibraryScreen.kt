@@ -81,6 +81,19 @@ fun LibraryScreen() {
     var addToPlaylistTarget by remember { mutableStateOf<MediaFile?>(null) }
     var renameTarget by remember { mutableStateOf<MediaFile?>(null) }
     var deleteTarget by remember { mutableStateOf<MediaFile?>(null) }
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var batchDeleteConfirm by remember { mutableStateOf(false) }
+    var batchPlaylistPicker by remember { mutableStateOf(false) }
+
+    val selectableFiles = state.files.filter { !it.isDirectory }
+    val selectedFiles = selectableFiles.filter { selectionKey(it) in selectedKeys }
+
+    // 切换媒体类型、目录或搜索状态时退出多选，避免选择集混入不可见文件。
+    LaunchedEffect(state.location, state.kind, state.isSearchActive) {
+        selectionMode = false
+        selectedKeys = emptySet()
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -101,12 +114,21 @@ fun LibraryScreen() {
     }
 
     val showSearchField = searchOpen || state.isSearchActive
-    BackHandler(enabled = showSearchField || state.location != LibraryLocation.Root) {
-        if (showSearchField) {
-            searchOpen = false
-            viewModel.clearSearch()
-        } else {
-            viewModel.navigateUp()
+    BackHandler(
+        enabled = selectionMode || showSearchField || state.location != LibraryLocation.Root,
+    ) {
+        when {
+            selectionMode -> {
+                selectionMode = false
+                selectedKeys = emptySet()
+            }
+
+            showSearchField -> {
+                searchOpen = false
+                viewModel.clearSearch()
+            }
+
+            else -> viewModel.navigateUp()
         }
     }
 
@@ -121,6 +143,11 @@ fun LibraryScreen() {
                 ),
             )
         }
+    }
+
+    val onToggleSelection: (MediaFile) -> Unit = { file ->
+        val key = selectionKey(file)
+        selectedKeys = if (key in selectedKeys) selectedKeys - key else selectedKeys + key
     }
 
     val viewerTitle = viewerTitle(state)
@@ -169,31 +196,53 @@ fun LibraryScreen() {
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.surface),
     ) {
-        LibraryTopBar(
-            state = state,
-            searchActive = showSearchField,
-            onBack = viewModel::navigateUp,
-            onSearchOpen = { searchOpen = true },
-            onSearchClose = {
-                searchOpen = false
-                viewModel.clearSearch()
-            },
-            onSearchQueryChange = viewModel::updateSearchQuery,
-            onClearQuery = { viewModel.updateSearchQuery("") },
-            onKindSelected = { kind ->
-                searchOpen = false
-                viewModel.setKind(kind)
-            },
-            onToggleViewMode = viewModel::toggleViewMode,
-            onSortBy = viewModel::setSortBy,
-            onSortAscending = viewModel::setSortAscending,
-            onToggleHidden = viewModel::toggleShowHidden,
-            onRefresh = viewModel::refresh,
-            onGoRoot = {
-                searchOpen = false
-                viewModel.goRoot()
-            },
-        )
+        if (selectionMode) {
+            SelectionTopBar(
+                selectedCount = selectedKeys.size,
+                allSelected = selectableFiles.isNotEmpty() && selectedKeys.size == selectableFiles.size,
+                onToggleSelectAll = {
+                    selectedKeys = if (selectableFiles.isNotEmpty() && selectedKeys.size == selectableFiles.size) {
+                        emptySet()
+                    } else {
+                        selectableFiles.map(::selectionKey).toSet()
+                    }
+                },
+                onClose = {
+                    selectionMode = false
+                    selectedKeys = emptySet()
+                },
+            )
+        } else {
+            LibraryTopBar(
+                state = state,
+                searchActive = showSearchField,
+                onBack = viewModel::navigateUp,
+                onSearchOpen = { searchOpen = true },
+                onSearchClose = {
+                    searchOpen = false
+                    viewModel.clearSearch()
+                },
+                onSearchQueryChange = viewModel::updateSearchQuery,
+                onClearQuery = { viewModel.updateSearchQuery("") },
+                onKindSelected = { kind ->
+                    searchOpen = false
+                    viewModel.setKind(kind)
+                },
+                onToggleViewMode = viewModel::toggleViewMode,
+                onSortBy = viewModel::setSortBy,
+                onSortAscending = viewModel::setSortAscending,
+                onToggleHidden = viewModel::toggleShowHidden,
+                onRefresh = viewModel::refresh,
+                onGoRoot = {
+                    searchOpen = false
+                    viewModel.goRoot()
+                },
+                onEnterSelection = {
+                    selectedKeys = emptySet()
+                    selectionMode = true
+                },
+            )
+        }
 
         if (!state.permissionGranted) {
             Box(
@@ -227,6 +276,9 @@ fun LibraryScreen() {
                 LibraryContent(
                     state = state,
                     imageLoader = imageLoader,
+                    selectionMode = selectionMode,
+                    selectedKeys = selectedKeys,
+                    onToggleSelection = onToggleSelection,
                     onRetry = viewModel::refresh,
                     onExitSearch = {
                         searchOpen = false
@@ -242,7 +294,16 @@ fun LibraryScreen() {
                     },
                 )
             }
-            if (state.location != LibraryLocation.Root && !state.isSearchActive) {
+            if (selectionMode) {
+                SelectionActionBar(
+                    selectedCount = selectedFiles.size,
+                    playlistEnabled = selectedFiles.any {
+                        it.kind == MediaKind.VIDEO || it.kind == MediaKind.AUDIO
+                    },
+                    onAddToPlaylist = { batchPlaylistPicker = true },
+                    onDelete = { batchDeleteConfirm = true },
+                )
+            } else if (state.location != LibraryLocation.Root && !state.isSearchActive) {
                 BottomPathBar(location = state.location)
             }
         }
@@ -309,6 +370,37 @@ fun LibraryScreen() {
             },
         )
     }
+
+    if (batchDeleteConfirm) {
+        DeleteSelectionDialog(
+            count = selectedFiles.size,
+            onDismiss = { batchDeleteConfirm = false },
+            onConfirm = {
+                batchDeleteConfirm = false
+                val files = selectedFiles
+                selectionMode = false
+                selectedKeys = emptySet()
+                viewModel.deleteFiles(files)
+            },
+        )
+    }
+
+    if (batchPlaylistPicker) {
+        AddSelectionToPlaylistDialog(
+            count = selectedFiles.count {
+                it.kind == MediaKind.VIDEO || it.kind == MediaKind.AUDIO
+            },
+            playlists = playlists,
+            onDismiss = { batchPlaylistPicker = false },
+            onSelect = { playlistId ->
+                batchPlaylistPicker = false
+                val files = selectedFiles
+                selectionMode = false
+                selectedKeys = emptySet()
+                viewModel.addFilesToPlaylist(files, playlistId)
+            },
+        )
+    }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -331,6 +423,7 @@ private fun LibraryTopBar(
     onToggleHidden: () -> Unit,
     onRefresh: () -> Unit,
     onGoRoot: () -> Unit,
+    onEnterSelection: () -> Unit,
 ) {
     Surface(color = MaterialTheme.colorScheme.primary) {
         Row(
@@ -536,6 +629,18 @@ private fun LibraryTopBar(
                         expanded = moreMenuExpanded,
                         onDismissRequest = { moreMenuExpanded = false },
                     ) {
+                        if (state.files.any { !it.isDirectory }) {
+                            DropdownMenuItem(
+                                text = { Text("多选") },
+                                onClick = {
+                                    moreMenuExpanded = false
+                                    onEnterSelection()
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.Checklist, contentDescription = null)
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("显示隐藏文件") },
                             onClick = {
@@ -580,6 +685,52 @@ private fun LibraryTopBar(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 多选模式顶部栏：显示已选数量、全选切换与退出。
+ */
+@Composable
+private fun SelectionTopBar(
+    selectedCount: Int,
+    allSelected: Boolean,
+    onToggleSelectAll: () -> Unit,
+    onClose: () -> Unit,
+) {
+    Surface(color = MaterialTheme.colorScheme.primary) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(
+                onClick = onClose,
+                modifier = Modifier.size(44.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Close,
+                    contentDescription = "退出多选",
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                )
+            }
+            Text(
+                text = "已选 $selectedCount 项",
+                color = MaterialTheme.colorScheme.onPrimary,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 4.dp),
+            )
+            TextButton(onClick = onToggleSelectAll) {
+                Text(
+                    text = if (allSelected) "取消全选" else "全选",
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
             }
         }
     }
@@ -734,6 +885,9 @@ private fun PermissionGate(
 private fun LibraryContent(
     state: LibraryUiState,
     imageLoader: ImageLoader,
+    selectionMode: Boolean,
+    selectedKeys: Set<String>,
+    onToggleSelection: (MediaFile) -> Unit,
     onRetry: () -> Unit,
     onExitSearch: () -> Unit,
     onFileClick: (MediaFile) -> Unit,
@@ -749,6 +903,9 @@ private fun LibraryContent(
         state.isSearchActive || state.location != LibraryLocation.Root -> FilesContent(
             state = state,
             imageLoader = imageLoader,
+            selectionMode = selectionMode,
+            selectedKeys = selectedKeys,
+            onToggleSelection = onToggleSelection,
             onExitSearch = onExitSearch,
             onFileClick = onFileClick,
             onFileActions = onFileActions,
@@ -869,6 +1026,9 @@ private fun RootContent(
 private fun FilesContent(
     state: LibraryUiState,
     imageLoader: ImageLoader,
+    selectionMode: Boolean,
+    selectedKeys: Set<String>,
+    onToggleSelection: (MediaFile) -> Unit,
     onExitSearch: () -> Unit,
     onFileClick: (MediaFile) -> Unit,
     onFileActions: (MediaFile) -> Unit,
@@ -908,8 +1068,18 @@ private fun FilesContent(
                 FileRow(
                     file = file,
                     imageLoader = imageLoader,
-                    onClick = { onFileClick(file) },
-                    onLongPress = { onFileActions(file) },
+                    selectionMode = selectionMode,
+                    selected = selectionKey(file) in selectedKeys,
+                    onClick = {
+                        if (selectionMode && !file.isDirectory) {
+                            onToggleSelection(file)
+                        } else {
+                            onFileClick(file)
+                        }
+                    },
+                    onLongPress = {
+                        if (!selectionMode) onFileActions(file)
+                    },
                     onRename = { onRenameFile(file) },
                     onDelete = { onDeleteFile(file) },
                 )
@@ -930,9 +1100,17 @@ private fun FilesContent(
                 FileGridCell(
                     file = file,
                     imageLoader = imageLoader,
-                    onClick = { onFileClick(file) },
+                    selectionMode = selectionMode,
+                    selected = selectionKey(file) in selectedKeys,
+                    onClick = {
+                        if (selectionMode && !file.isDirectory) {
+                            onToggleSelection(file)
+                        } else {
+                            onFileClick(file)
+                        }
+                    },
                     onLongPress = {
-                        if (!file.isDirectory) onFileActions(file)
+                        if (!selectionMode && !file.isDirectory) onFileActions(file)
                     },
                 )
             }
@@ -1041,6 +1219,8 @@ private fun FolderRow(
 private fun FileRow(
     file: MediaFile,
     imageLoader: ImageLoader,
+    selectionMode: Boolean,
+    selected: Boolean,
     onClick: () -> Unit,
     onLongPress: () -> Unit,
     onRename: () -> Unit,
@@ -1085,7 +1265,13 @@ private fun FileRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (file.isDirectory) {
+        if (selectionMode && !file.isDirectory) {
+            Checkbox(
+                checked = selected,
+                onCheckedChange = null,
+                modifier = Modifier.padding(horizontal = 6.dp),
+            )
+        } else if (file.isDirectory) {
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                 contentDescription = null,
@@ -1222,6 +1408,8 @@ private fun FolderGridCell(
 private fun FileGridCell(
     file: MediaFile,
     imageLoader: ImageLoader,
+    selectionMode: Boolean,
+    selected: Boolean,
     onClick: () -> Unit,
     onLongPress: () -> Unit,
 ) {
@@ -1236,13 +1424,30 @@ private fun FileGridCell(
             }
             .padding(vertical = 2.dp),
     ) {
-        FileThumbnail(
-            file = file,
-            imageLoader = imageLoader,
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f),
-        )
+        Box(modifier = Modifier.fillMaxWidth()) {
+            FileThumbnail(
+                file = file,
+                imageLoader = imageLoader,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f),
+            )
+            if (selectionMode && !file.isDirectory) {
+                Icon(
+                    imageVector = if (selected) {
+                        Icons.Filled.CheckCircle
+                    } else {
+                        Icons.Filled.RadioButtonUnchecked
+                    },
+                    contentDescription = if (selected) "已选中" else "未选中",
+                    tint = if (selected) MaterialTheme.colorScheme.primary else Color.White,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .size(22.dp),
+                )
+            }
+        }
         Spacer(Modifier.height(6.dp))
         Text(
             text = file.title,
@@ -1441,6 +1646,56 @@ private fun BottomPathBar(location: LibraryLocation) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+    }
+}
+
+/**
+ * 多选模式下方的批量操作栏：加入播放列表、批量删除。
+ */
+@Composable
+private fun SelectionActionBar(
+    selectedCount: Int,
+    playlistEnabled: Boolean,
+    onAddToPlaylist: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = 3.dp,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(
+                onClick = onAddToPlaylist,
+                enabled = playlistEnabled,
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.PlaylistPlay,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text("加入播放列表")
+            }
+            Spacer(Modifier.weight(1f))
+            TextButton(
+                onClick = onDelete,
+                enabled = selectedCount > 0,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Delete,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text("删除", color = MaterialTheme.colorScheme.error)
+            }
+        }
     }
 }
 
@@ -1669,13 +1924,46 @@ private fun AddToPlaylistDialog(
     onDismiss: () -> Unit,
     onSelect: (Long) -> Unit,
 ) {
+    PlaylistPickerDialog(
+        header = file.title,
+        playlists = playlists,
+        onDismiss = onDismiss,
+        onSelect = onSelect,
+    )
+}
+
+/**
+ * 多选模式下批量加入播放列表。
+ */
+@Composable
+private fun AddSelectionToPlaylistDialog(
+    count: Int,
+    playlists: List<PlaylistSummary>,
+    onDismiss: () -> Unit,
+    onSelect: (Long) -> Unit,
+) {
+    PlaylistPickerDialog(
+        header = "已选择可加入的视频/音频共 $count 个。",
+        playlists = playlists,
+        onDismiss = onDismiss,
+        onSelect = onSelect,
+    )
+}
+
+@Composable
+private fun PlaylistPickerDialog(
+    header: String,
+    playlists: List<PlaylistSummary>,
+    onDismiss: () -> Unit,
+    onSelect: (Long) -> Unit,
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("加入播放列表") },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    text = file.title,
+                    text = header,
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
@@ -1725,6 +2013,35 @@ private fun AddToPlaylistDialog(
             }
         },
         confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
+}
+
+@Composable
+private fun DeleteSelectionDialog(
+    count: Int,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("删除文件") },
+        text = {
+            Text(
+                text = "确定要删除选中的 $count 个文件吗？此操作不可恢复。",
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("删除", color = MaterialTheme.colorScheme.error)
+            }
+        },
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("取消")
@@ -1811,6 +2128,9 @@ private fun DeleteDialog(
 // -------------------------------------------------------------------------------------------------
 // 文案 / 数据格式化 / 启动图片查看
 // -------------------------------------------------------------------------------------------------
+
+private fun selectionKey(file: MediaFile): String =
+    file.path.ifBlank { file.contentUri.orEmpty() }
 
 private fun kindLabel(kind: MediaKind): String = when (kind) {
     MediaKind.VIDEO -> "视频"

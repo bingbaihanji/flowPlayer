@@ -349,6 +349,71 @@ class LibraryViewModel(
     }
 
     /**
+     * 批量删除所选文件：逐项执行并汇总结果，最后统一刷新列表。
+     */
+    fun deleteFiles(files: List<MediaFile>) {
+        if (files.isEmpty()) return
+        viewModelScope.launch {
+            var success = 0
+            var failed = 0
+            var firstError: String? = null
+            files.forEach { file ->
+                val result = repository.delete(file)
+                if (result.isSuccess) {
+                    success++
+                } else {
+                    failed++
+                    if (firstError == null) {
+                        firstError = result.exceptionOrNull()?.message ?: "删除失败"
+                    }
+                }
+            }
+            val message = if (failed == 0) {
+                "已删除 $success 个文件"
+            } else {
+                "已删除 $success 个，失败 $failed 个${firstError?.let { "：$it" }.orEmpty()}"
+            }
+            _messages.trySend(message)
+            reload()
+        }
+    }
+
+    /**
+     * 批量加入播放列表：仅处理可加入的视频/音频，逐项执行并汇总结果。
+     */
+    fun addFilesToPlaylist(files: List<MediaFile>, playlistId: Long) {
+        val targets = files.filter {
+            !it.isDirectory && (it.kind == MediaKind.VIDEO || it.kind == MediaKind.AUDIO)
+        }
+        if (targets.isEmpty()) {
+            _messages.trySend("所选文件中没有可加入播放列表的视频或音频")
+            return
+        }
+        viewModelScope.launch {
+            var success = 0
+            targets.forEach { file ->
+                val result = runCatching {
+                    playlistRepository.addItem(
+                        playlistId = playlistId,
+                        path = file.path,
+                        title = file.title,
+                        mimeType = file.mimeType.orEmpty(),
+                        durationMs = file.durationMs ?: 0L,
+                        size = file.size,
+                    )
+                }
+                if (result.isSuccess) success++
+            }
+            val failed = targets.size - success
+            if (failed == 0) {
+                _messages.trySend("已加入 $success 个文件")
+            } else {
+                _messages.trySend("已加入 $success 个，失败 $failed 个")
+            }
+        }
+    }
+
+    /**
      * 把视频/音频加入指定播放列表。同一列表内重复 path 由仓库替换旧条目。
      */
     fun addToPlaylist(file: MediaFile, playlistId: Long) {
