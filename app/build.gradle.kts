@@ -29,6 +29,8 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // 与 debug 共用签名，便于覆盖安装已有 debug 版本；上架应用商店前应改用独立 release keystore。
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
